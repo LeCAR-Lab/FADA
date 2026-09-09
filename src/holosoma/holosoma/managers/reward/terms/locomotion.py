@@ -19,6 +19,7 @@ from holosoma.utils.rotations import (
     quat_apply,
     quat_rotate_batched,
     quat_rotate_inverse,
+    wrap_to_pi,
 )
 from holosoma.utils.safe_torch_import import torch
 
@@ -108,6 +109,23 @@ def penalty_feet_ori(env: LeggedRobotLocomotionManager) -> torch.Tensor:
         + torch.sum(torch.square(right_gravity[:, :2]), dim=1) ** 0.5
     )
 
+def feet_heading_alignment(env: LeggedRobotLocomotionManager) -> torch.Tensor:
+    """Penalize feet heading alignment.
+    """
+    left_quat = env.simulator._rigid_body_rot[:, env.feet_indices[0]]
+    right_quat = env.simulator._rigid_body_rot[:, env.feet_indices[1]]
+    forward_left_feet = quat_apply(left_quat, base_forward_vector(env), w_last=True)
+    left_heading = torch.atan2(forward_left_feet[:, 1], forward_left_feet[:, 0])
+    forward_right_feet = quat_apply(right_quat, base_forward_vector(env), w_last=True)
+    right_heading = torch.atan2(forward_right_feet[:, 1], forward_right_feet[:, 0])
+    root_forward = quat_apply(env.base_quat, base_forward_vector(env), w_last=True)
+    heading_root = torch.atan2(root_forward[:, 1], root_forward[:, 0])
+    
+
+    heading_diff_left = torch.abs(wrap_to_pi(left_heading - heading_root))
+    heading_diff_right = torch.abs(wrap_to_pi(right_heading - heading_root))
+    return heading_diff_left + heading_diff_right
+
 
 # ================================================================================================
 # Limit Rewards
@@ -186,6 +204,18 @@ def penalty_ang_vel_xy(env) -> torch.Tensor:
     """
     ang_vel = get_base_ang_vel(env)
     return torch.sum(torch.square(ang_vel[:, :2]), dim=1)
+
+def penalty_lin_vel_z(env) -> torch.Tensor:
+    """Penalize z axis base linear velocity.
+
+    Args:
+        env: The environment instance
+
+    Returns:
+        Reward tensor [num_envs]
+    """
+    lin_vel = get_base_lin_vel(env)
+    return torch.square(lin_vel[:, 2])
 
 
 def penalty_close_feet_xy(env, close_feet_threshold: float = 0.05) -> torch.Tensor:
@@ -390,3 +420,155 @@ def alive(env) -> torch.Tensor:
         Reward tensor [num_envs]
     """
     return torch.ones(env.num_envs, dtype=torch.float, device=env.device)
+
+
+def feet_stance_width(
+    env: LeggedRobotLocomotionManager,
+    desired_feet_stance_width: float = 0.30,
+    feet_stance_width_std: float = 0.05,
+) -> torch.Tensor:
+    """Reward for maintaining desired stance width between feet.
+
+    Rewards the robot for keeping feet at target lateral separation in body frame.
+    Only applies reward when both feet are in contact.
+
+    Args:
+        env: The environment instance
+        desired_feet_stance_width: Target lateral distance between feet (meters)
+        feet_stance_width_std: Standard deviation for exponential reward scaling
+
+    Returns:
+        Reward tensor [num_envs]
+    """
+    # Get feet positions in world frame
+    feet_pos = env.simulator._rigid_body_pos[:, env.feet_indices, :]
+
+    # Translate to robot frame (subtract base position)
+    cur_footsteps_translated = feet_pos - env.simulator.robot_root_states[:, :3].unsqueeze(1)
+
+    # Rotate to body frame using inverse quaternion rotation
+    footsteps_in_body_frame = torch.zeros(env.num_envs, 2, 3, device=env.device)
+    for i in range(2):
+        footsteps_in_body_frame[:, i, :] = quat_rotate_inverse(
+            env.base_quat, cur_footsteps_translated[:, i, :], w_last=True
+        )
+
+    # Desired y-positions: +stance_width/2 and -stance_width/2
+    stance_width = desired_feet_stance_width * torch.ones([env.num_envs, 1], device=env.device)
+    desired_ys = torch.cat([stance_width / 2, -stance_width / 2], dim=1)
+
+    # Calculate squared error
+    stance_diff = torch.square(desired_ys - footsteps_in_body_frame[:, :, 1])
+
+    # Exponential reward
+    reward = torch.exp(-torch.sum(stance_diff, dim=1) / feet_stance_width_std**2)
+
+    # Only when both feet are in contact
+    reward *= torch.all(env.simulator.contact_forces[:, env.feet_indices, 2] > 1.0, dim=1).float()
+
+    return reward
+
+
+def penalty_feet_slippage(env: LeggedRobotLocomotionManager) -> torch.Tensor:
+    """Penalize foot slippage when in contact with ground.
+
+    Penalizes horizontal (xy) foot velocity when feet are in contact, indicating slippage.
+    Only applies penalty when contact forces exceed threshold.
+    Vertical (z) velocity is ignored to allow natural foot lifting.
+
+    Args:
+        env: The environment instance
+
+    Returns:
+        Reward tensor [num_envs]
+    """
+    # Get foot velocities [num_envs, num_feet, 3]
+    foot_vel = env.simulator._rigid_body_vel[:, env.feet_indices]
+
+    # Only consider horizontal velocity (x, y), ignore vertical (z) to allow foot lifting
+    foot_vel_xy = foot_vel[:, :, :2]  # [num_envs, num_feet, 2]
+    foot_vel_xy_norm = torch.norm(foot_vel_xy, dim=-1)  # [num_envs, num_feet]
+
+    # Contact mask: feet with contact forces > 1.0
+    contact_forces_norm = torch.norm(env.simulator.contact_forces[:, env.feet_indices, :], dim=-1)
+    in_contact = (contact_forces_norm > 1.0).float()  # [num_envs, num_feet]
+
+    # Penalty is horizontal velocity magnitude when in contact, summed over both feet
+    penalty = torch.sum(foot_vel_xy_norm * in_contact, dim=1)
+
+    return penalty
+
+
+def feet_air_time_single_stance(
+    env: LeggedRobotLocomotionManager, max_air_time: float = 0.4, min_vel_threshold: float = 0.1
+) -> torch.Tensor:
+    """Reward for single stance phase with long air/contact times.
+
+    Rewards the robot for maintaining single stance (exactly one foot in contact) with
+    long air times. The reward is based on the minimum time across feet (air or contact),
+    encouraging smooth transitions between feet during walking/running.
+
+    Args:
+        env: The environment instance
+        max_air_time: Maximum reward clamp value (seconds)
+        min_vel_threshold: Minimum velocity command to receive reward
+
+    Returns:
+        Reward tensor [num_envs]
+    """
+    # Initialize state buffers if they don't exist
+    if not hasattr(env, "feet_air_time"):
+        env.feet_air_time = torch.zeros(
+            env.num_envs, len(env.feet_indices), dtype=torch.float, device=env.device, requires_grad=False
+        )
+    if not hasattr(env, "feet_contact_time"):
+        env.feet_contact_time = torch.zeros(
+            env.num_envs, len(env.feet_indices), dtype=torch.float, device=env.device, requires_grad=False
+        )
+    if not hasattr(env, "last_contacts"):
+        env.last_contacts = torch.zeros(
+            env.num_envs, len(env.feet_indices), dtype=torch.bool, device=env.device, requires_grad=False
+        )
+
+    # Detect contact (filter contacts for reliability on meshes)
+    contact = env.simulator.contact_forces[:, env.feet_indices, 2] > 1.0  # [num_envs, 2]
+    contact_filt = torch.logical_or(contact, env.last_contacts)
+    env.last_contacts = contact
+
+    in_contact = contact_filt
+    in_air = ~in_contact
+
+    # Accumulate time in each state
+    env.feet_air_time += env.dt * in_air.float()
+    env.feet_contact_time += env.dt * in_contact.float()
+
+    # Determine which mode (air or contact) each foot is currently in
+    # Use contact time when foot is in contact, air time when foot is in air
+    in_mode_time = torch.where(in_contact, env.feet_contact_time, env.feet_air_time)
+
+    # Check for single stance: exactly one foot should be in contact
+    single_stance = torch.sum(in_contact.int(), dim=1) == 1  # [num_envs]
+
+    # Get the minimum time across feet (this will be the time of the foot that's in the air during single stance)
+    # Only consider when in single stance
+    min_time = torch.min(
+        torch.where(single_stance.unsqueeze(-1), in_mode_time, torch.zeros_like(in_mode_time)), dim=1
+    )[0]
+
+    # Clamp reward to maximum threshold
+    reward = torch.clamp(min_time, max=max_air_time)
+
+    # No reward for zero/low velocity commands
+    commands = env.command_manager.commands
+    reward *= (torch.norm(commands[:, :2], dim=1) > min_vel_threshold).float()
+
+    # Reset counters when foot state changes
+    # Reset air time when foot makes contact (first contact)
+    first_contact = (env.feet_air_time > 0.0) * contact_filt
+    env.feet_air_time *= ~contact_filt
+
+    # Reset contact time when foot leaves contact (first air)
+    first_air = (env.feet_contact_time > 0.0) * in_air
+    env.feet_contact_time *= ~in_air
+
+    return reward

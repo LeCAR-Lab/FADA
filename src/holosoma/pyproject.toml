@@ -9,6 +9,7 @@ requires-python = ">=3.8"
 dependencies = [
     "astor",
     "easydict",
+    "h5py",
     "importlib_resources; python_version < '3.9'",
     "ipdb",
     "joblib",
@@ -20,7 +21,11 @@ dependencies = [
     "mypy==1.14.1",
     "notebook",
     "numpy-stl",
-    "numpy==1.23.5",
+    # A range, spanning the numpy versions the shipped environments install: hsmujoco
+    # runs on 2.2.6, IsaacSim 5.1 requires 1.26.0 (isaacsim-kernel), and
+    # hsinference/hssim install 1.23.5. Upper bound `<2.4`: numpy 2.4 breaks `yourdfpy`'s
+    # urdf.py `float(q)` conversion, and holosoma depends on yourdfpy below.
+    "numpy>=1.23.5,<2.4",
     "omegaconf",  # Used for config resolvers and DictConfig type hints
     "onnx",
     "onnxruntime",
@@ -28,6 +33,7 @@ dependencies = [
     "opencv-python",
     "plotly",
     "pydantic",
+    "pyyaml",
     "pygame",
     "pynput",
     "pytest",
@@ -38,6 +44,7 @@ dependencies = [
     "tensorboard",
     "tensordict",
     "termcolor",
+    "torch>=2.0.0",
     "tqdm",
     "trimesh",
     "types-pynput",
@@ -55,8 +62,28 @@ dependencies = [
 # Mark optional-dependencies as dynamic since it needs runtime computation
 dynamic = ["optional-dependencies"]
 
+# `holosoma/bridge/ros2/ros2_bridge.py` imports `rclpy` at module scope, so that packaged
+# module does not import unless a ROS 2 distribution is on the path. Nothing in the FADA
+# pipeline uses the ROS 2 bridge.
+#
+# `rclpy` is not published on PyPI; it ships with a ROS 2 installation, so it cannot be
+# declared as a `[ros2]` extra. (Contrast `holosoma-inference[mocap]`, whose
+# `pyvicon-datastream` is on PyPI and is a real extra.)
+#
+# `tests/test_packaged_modules_import.py` lists `holosoma.bridge.ros2.ros2_bridge` as a
+# declared optional-import module, naming `rclpy`.
+
+[project.entry-points."holosoma.bridge"]
+unitree = "holosoma.bridge.unitree:UnitreeSdk2Bridge"
+booster = "holosoma.bridge.booster:BoosterSdk2Bridge"
+
 [tool.setuptools.packages.find]
 where = ["."]
+# PEP 517 discovery defaults `namespaces = true`, so every directory under `where` is a
+# package. The data directories rely on that (`holosoma/data/robots/t1` has no
+# `__init__.py`); this glob confines it to the `holosoma` tree, leaving `tests/` out of
+# the distribution.
+include = ["holosoma*"]
 
 [tool.pytest.ini_options]
 markers = [

@@ -152,6 +152,11 @@ class RootStatesProxy:
         self.tensor_wxyz = tensor_wxyz
         self.tensor_xyzw = fullstate_wxyz_to_xyzw(tensor_wxyz)
 
+    @property
+    def shape(self):
+        """Tensor shape for API compatibility (e.g. termination checks)."""
+        return self.tensor_xyzw.shape
+
     def __getitem__(self, index):
         """Get tensor values in xyzw quaternion format.
 

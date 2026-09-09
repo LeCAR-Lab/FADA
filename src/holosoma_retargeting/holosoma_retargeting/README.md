@@ -2,6 +2,15 @@
 
 This repository provides tools for retargeting human motion data to humanoid robots. It supports multiple data formats (smplh, mocap, lafan) and task types including robot-only motion, object interaction, and climbing.
 
+**Run these commands from this directory.** Every path below (`demo_data/...`,
+`models/g1/g1_29dof.urdf`, `demo_results/...`, the LAFAN `git clone` into `data_utils/`) is
+relative to `src/holosoma_retargeting/holosoma_retargeting/`, and the results are written back
+into it. The `demo_data/` (9.2 MB) and `models/` (284 MB) trees are **deliberately excluded
+from the `holosoma-retargeting` wheel** — they exist only in a source checkout of this
+repository, so `pip install holosoma-retargeting` alone is not enough to run anything here. If a
+default path does not resolve, `holosoma_retargeting/asset_paths.py` reports exactly that
+rather than failing deeper in a loader.
+
 **Data Requirements**: The retargeting pipeline requires motion data in world joint positions. For custom data, you need to prepare world joint positions in shape `(T, J, 3)` where T is the number of frames and J is the number of joints, and modify `demo_joints` and `joints_mapping` defined in `config_types/data_type.py`.
 
 ## Single Sequence Motion Retargeting

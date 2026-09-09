@@ -1,9 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Exit on error, and print commands
 set -e
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 ROOT_DIR=$(dirname "$SCRIPT_DIR")
+
+if ! command -v sudo &> /dev/null; then
+  # in docker build sudo isn't avaiable, but its ok
+  echo "Warning: sudo could not be found, you may need to run this script with sudo"
+  function sudo { "$@"; }
+  export -f sudo
+fi
 
 # MuJoCo Warp version to install -- the repo is missing version tags and branches
 # Arbitrarily chosen from mainline at the time we've ~tested against
@@ -54,9 +61,10 @@ CONDA_ENV_NAME=${CONDA_ENV_NAME:-hsmujoco}
 echo "conda environment name is set to: $CONDA_ENV_NAME"
 
 source ${SCRIPT_DIR}/source_common.sh
+unset CONDA_ENVS_PATH
 ENV_ROOT=$CONDA_ROOT/envs/$CONDA_ENV_NAME
 SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_$CONDA_ENV_NAME
-WARP_SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_$CONDA_ENV_NAME_warp
+WARP_SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_${CONDA_ENV_NAME}_warp
 
 mkdir -p $WORKSPACE_DIR
 
@@ -95,10 +103,12 @@ if [[ ! -f $SENTINEL_FILE ]]; then
     $CONDA_ROOT/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
     $CONDA_ROOT/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
     $CONDA_ROOT/bin/conda install -y mamba -c conda-forge -n base
-    MAMBA_ROOT_PREFIX=$CONDA_ROOT $CONDA_ROOT/bin/mamba create -y -n $CONDA_ENV_NAME python=3.10 -c conda-forge --override-channels
+    MAMBA_ROOT_PREFIX=$CONDA_ROOT $CONDA_ROOT/bin/mamba create -y -p "$ENV_ROOT" python=3.10 -c conda-forge --override-channels
   fi
 
-  source $CONDA_ROOT/bin/activate $CONDA_ENV_NAME
+  # shellcheck disable=SC1091
+  source "$CONDA_ROOT/etc/profile.d/conda.sh"
+  conda activate "$ENV_ROOT"
 
   # Install system dependencies for MuJoCo
   # Note: These may require sudo access - document this requirement
@@ -116,11 +126,11 @@ if [[ ! -f $SENTINEL_FILE ]]; then
 
   # Install MuJoCo and related packages
   echo "Installing MuJoCo Python bindings..."
-  pip install --upgrade pip
+  "$ENV_ROOT/bin/python" -m pip install --upgrade pip
 
   # Core MuJoCo packages
-  pip install 'mujoco>=3.0.0'
-  pip install mujoco-python-viewer
+  "$ENV_ROOT/bin/python" -m pip install 'mujoco>=3.0.0'
+  "$ENV_ROOT/bin/python" -m pip install mujoco-python-viewer
   # Optional: Gymnasium MuJoCo environments (if needed for compatibility)
  # pip install "gymnasium[mujoco]"
 
@@ -130,12 +140,20 @@ if [[ ! -f $SENTINEL_FILE ]]; then
 
   # Install Holosoma packages
   echo "Installing Holosoma packages"
-  pip install -U pip
+  "$ENV_ROOT/bin/python" -m pip install -U pip
   if [[ "$OS_NAME" == "Linux" ]]; then
-    pip install -e "$ROOT_DIR/src/holosoma[unitree, booster]"
+    "$ENV_ROOT/bin/python" -m pip install -e "$ROOT_DIR/src/holosoma[unitree, booster]"
+    # unitree_sdk2py (DDS Python API); holosoma bridge imports unitree_sdk2py.*
+    # Match setup_inference.sh: skip aarch64 (Jetson may use different ORT/SDK layouts).
+    if [[ "$ARCH_NAME" == "x86_64" ]]; then
+      if [[ ! -d $WORKSPACE_DIR/unitree_sdk2_python ]]; then
+        git clone https://github.com/unitreerobotics/unitree_sdk2_python.git "$WORKSPACE_DIR/unitree_sdk2_python"
+      fi
+      "$ENV_ROOT/bin/python" -m pip install -e "$WORKSPACE_DIR/unitree_sdk2_python/"
+    fi
   elif [[ "$OS_NAME" == "Darwin" ]]; then
     echo "Warning: only unitree support for osx"
-    pip install -e "$ROOT_DIR/src/holosoma[unitree]"
+    "$ENV_ROOT/bin/python" -m pip install -e "$ROOT_DIR/src/holosoma[unitree]"
   else
     echo "Unsupported OS: $OS_NAME"
     exit 1
@@ -143,8 +161,8 @@ if [[ ! -f $SENTINEL_FILE ]]; then
 
   # Validate MuJoCo installation
   echo "Validating MuJoCo installation..."
-  python -c "import mujoco; print(f'MuJoCo version: {mujoco.__version__}')"
-  python -c "import mujoco_viewer; print('MuJoCo viewer imported successfully')"
+  "$ENV_ROOT/bin/python" -c "import mujoco; print(f'MuJoCo version: {mujoco.__version__}')"
+  "$ENV_ROOT/bin/python" -c "import mujoco_viewer; print('MuJoCo viewer imported successfully')"
 
   # Create validation script for later testing
   cat > $WORKSPACE_DIR/validate_mujoco.py << 'EOF'
@@ -192,7 +210,7 @@ if __name__ == "__main__":
 EOF
 
   # Run validation
-  python $WORKSPACE_DIR/validate_mujoco.py
+  "$ENV_ROOT/bin/python" $WORKSPACE_DIR/validate_mujoco.py
 
   touch $SENTINEL_FILE
   echo ""
@@ -212,7 +230,9 @@ if [[ "$INSTALL_WARP" == "true" ]] && [[ ! -f $WARP_SENTINEL_FILE ]]; then
   echo "Installing MuJoCo Warp (GPU acceleration)..."
 
   # Ensure conda environment is activated
-  source $CONDA_ROOT/bin/activate $CONDA_ENV_NAME
+  # shellcheck disable=SC1091
+  source "$CONDA_ROOT/etc/profile.d/conda.sh"
+  conda activate "$ENV_ROOT"
 
   # Check NVIDIA driver version (required for CUDA 12.4+)
   MIN_DRIVER_VERSION="550.54.14"
@@ -253,8 +273,8 @@ if [[ "$INSTALL_WARP" == "true" ]] && [[ ! -f $WARP_SENTINEL_FILE ]]; then
     git clone https://github.com/google-deepmind/mujoco_warp.git $WORKSPACE_DIR/mujoco_warp && \
       git -C $WORKSPACE_DIR/mujoco_warp checkout ${MUJOCO_WARP_COMMIT}
   fi
-  pip install uv
-  uv pip install -e $WORKSPACE_DIR/mujoco_warp[dev,cuda]
+  "$ENV_ROOT/bin/python" -m pip install uv
+  uv pip install --python "$ENV_ROOT/bin/python" -e "$WORKSPACE_DIR/mujoco_warp[dev,cuda]"
 
   touch $WARP_SENTINEL_FILE
 
@@ -268,6 +288,17 @@ if [[ "$INSTALL_WARP" == "true" ]] && [[ ! -f $WARP_SENTINEL_FILE ]]; then
   echo ""
   echo "Activate with: source scripts/source_mujoco_setup.sh"
   echo "=========================================="
+fi
+
+# holosoma MuJoCo / RL code imports torch; ensure it exists (covers envs created before torch was declared).
+if [[ -d "$ENV_ROOT" && -x "$CONDA_ROOT/bin/conda" ]]; then
+  # shellcheck disable=SC1091
+  source "$CONDA_ROOT/etc/profile.d/conda.sh"
+  conda activate "$ENV_ROOT"
+  if ! "$ENV_ROOT/bin/python" -c "import torch" 2>/dev/null; then
+    echo "Installing PyTorch (required by holosoma)..."
+    "$ENV_ROOT/bin/python" -m pip install 'torch>=2.0.0'
+  fi
 fi
 
 echo ""

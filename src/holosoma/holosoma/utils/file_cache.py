@@ -33,6 +33,9 @@ def _get_smart_open():
 def _get_cache_dir() -> Path:
     """Get the cache directory path."""
     cache_dir_str = os.environ.get("HOLOSOMA_CACHE_DIR", "~/.cache/holosoma/file_cache")
+    # FADA: prefer HOLOSOMA_LOG_BASE_DIR/cache when HOLOSOMA_CACHE_DIR isn't explicitly set.
+    if "HOLOSOMA_CACHE_DIR" not in os.environ and os.environ.get("HOLOSOMA_LOG_BASE_DIR", "").strip():
+        cache_dir_str = os.path.join(os.environ["HOLOSOMA_LOG_BASE_DIR"].strip(), "cache")
     cache_dir = Path(cache_dir_str).expanduser()
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir

@@ -19,7 +19,8 @@ from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.file_cache import get_cached_file_path
 from holosoma.utils.logging import LoguruLoggingBridge
-from holosoma.utils.safe_torch_import import torch
+from holosoma.utils.safe_torch_import import torch  # noqa: F401 - keeps the isaacgym-before-torch import order
+from holosoma.utils.safe_torch_load import load_checkpoint as safe_load_checkpoint
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type
 
 _WANDB_PREFIX = "wandb://"
@@ -62,6 +63,38 @@ class CheckpointConfig:
     checkpoint: str | None = None
     """Path to a local checkpoint file, or W&B URI in the format `wandb://<entity>/<project>/<run_id>[/<checkpoint_name>]`."""
 
+    eval_exp_name: str | None = None
+    """Optional subfolder name for eval outputs (under checkpoint_dir/eval/...)."""
+
+    dr_terrain_from_checkpoint: str | None = None
+    """Optional path to another checkpoint. If set, use that checkpoint's randomization and terrain
+    (e.g. phase2 DR) for this eval, while still loading the policy from --checkpoint (e.g. phase1)."""
+
+    randomize_commands: bool = False
+    """If True, set ``allow_eval_randomization=True`` on every locomotion-style command term in the
+    saved config before env construction. By default LocomotionCommand zeroes commands during eval
+    (see ``LocomotionCommand.reset()`` in ``managers/command/terms/locomotion.py``) which makes the
+    robot stand still — useful for
+    visualizing the trained policy's actual locomotion behaviour from the IsaacSim eval path."""
+
+    force_scale_eval_level: int = -1
+    """Force-adaptive eval freeze level. -1 disables (curriculum stays live).
+    0/1/2 freezes ``env.apply_force_scale`` at 0.0 / 0.5 / 1.0 respectively, and disables
+    the ``force_scale_curriculum`` term so subsequent resets cannot re-bump the scale.
+    No-op for envs that do not own ``apply_force_scale`` (i.e. non-force-adaptive variants)."""
+
+    upper_pose_zero_only: bool = False
+    """If True, force ``ref_upper_dof_pos`` to all zeros for the entire eval run, skipping
+    AMASS motion clip playback — this pins every upper DOF reference to 0.0, which on G1
+    means arms straight up. Achieved by no-op'ing the ``UpperBodyRefPoseCommand``
+    step/reset paths after env init."""
+
+    force_randomize_init_levels: bool = False
+    """If True, inject ``randomize_init_levels=True`` into the ``terrain_level_curriculum``
+    params before env construction. This makes every env reset spawn at a uniformly random
+    terrain level instead of following the curriculum order — required for fair comparison
+    evals where the baseline was trained without this flag but the reference model was."""
+
 
 def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> tuple[ExperimentConfig, str | None]:
     """Load checkpoint configuration from either W&B run or local checkpoint.
@@ -99,7 +132,7 @@ def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> tuple[Expe
 def _load_config_from_checkpoint(checkpoint_path: Path) -> tuple[ExperimentConfig, str | None]:
     """Attempt to load the serialized ExperimentConfig from a checkpoint file."""
 
-    checkpoint_contents = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint_contents = safe_load_checkpoint(checkpoint_path, map_location="cpu")
     config_data = checkpoint_contents["experiment_config"]
     return ExperimentConfig(**config_data), checkpoint_contents.get("wandb_run_path")
 

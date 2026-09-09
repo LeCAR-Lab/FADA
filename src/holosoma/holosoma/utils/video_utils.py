@@ -110,7 +110,17 @@ def format_command_labels(commands, env_id=0):
     return ", ".join(labels) if labels else "Commands: No data"
 
 
-def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging=True, episode_id=None):
+def create_video(
+    video_frames,
+    fps,
+    save_dir,
+    output_format="mp4",
+    wandb_logging=True,
+    episode_id=None,
+    h264_crf=23,
+    h264_maxrate="300k",
+    h264_preset="medium",
+):
     """Create video with configurable output format and destination.
 
     Handles both local saving and wandb upload based on configuration.
@@ -130,6 +140,12 @@ def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging
         Whether to upload to wandb (if available) or save locally.
     episode_id : int | None, default=None
         Episode ID for filename generation.
+    h264_crf : int, default=23
+        Quality target for H.264 encoding. Larger values trade quality for smaller files.
+    h264_maxrate : str, default="300k"
+        Optional ffmpeg H.264 peak bitrate cap, e.g. "150k" or "1M".
+    h264_preset : str, default="medium"
+        ffmpeg H.264 preset. Slower presets usually yield smaller files.
 
     Returns
     -------
@@ -184,13 +200,20 @@ def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging
                 "-pix_fmt",
                 "yuv420p",
                 "-crf",
-                "23",
-                "-maxrate",
-                "300k",
+                str(int(h264_crf)),
                 "-preset",
-                "medium",
-                str(final_video),
+                str(h264_preset),
+                "-movflags",
+                "+faststart",
             ]
+            if h264_maxrate:
+                ffmpeg_cmd.extend(
+                    [
+                        "-maxrate",
+                        str(h264_maxrate),
+                    ]
+                )
+            ffmpeg_cmd.append(str(final_video))
 
             result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=True)
             if result.returncode != 0:

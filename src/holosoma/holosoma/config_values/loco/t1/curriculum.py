@@ -50,4 +50,68 @@ t1_29dof_curriculum_fast_sac = CurriculumManagerCfg(
     step_terms={},
 )
 
+t1_23dof_curriculum = CurriculumManagerCfg(
+    setup_terms={
+        "average_episode_tracker": CurriculumTermCfg(
+            func="holosoma.managers.curriculum.terms.locomotion:AverageEpisodeLengthTracker",
+            params={},
+        ),
+        "penalty_curriculum": CurriculumTermCfg(
+            func="holosoma.managers.curriculum.terms.locomotion:PenaltyCurriculum",
+            params={
+                "enabled": True,
+                "tag": "penalty_curriculum",
+                "initial_scale": 0.1,
+                "min_scale": 0.0,
+                "max_scale": 1.0,
+                "level_down_threshold": 150.0,
+                "level_up_threshold": 750.0,
+                "degree": 0.00025,
+            },
+        ),
+    },
+    reset_terms={},
+    step_terms={},
+)
+
+t1_23dof_curriculum_slope = CurriculumManagerCfg(
+    params={
+        "num_compute_average_epl": 1000,
+    },
+    setup_terms={
+        # Order matters: terrain curriculum runs before the avg tracker so
+        # we read pending_episode_lengths cleanly.
+        "terrain_level_curriculum": CurriculumTermCfg(
+            func="holosoma.managers.curriculum.terms.locomotion:TerrainLevelCurriculum",
+            params={
+                "enabled": True,
+                "initial_level": 0,
+                "level_up_threshold": 800.0,
+                "level_down_threshold": 300.0,
+                "randomize_init_levels": True,
+            },
+        ),
+        "average_episode_tracker": CurriculumTermCfg(
+            func="holosoma.managers.curriculum.terms.locomotion:AverageEpisodeLengthTracker",
+            params={},
+        ),
+        "penalty_curriculum": CurriculumTermCfg(
+            func="holosoma.managers.curriculum.terms.locomotion:PenaltyCurriculum",
+            params={
+                "enabled": True,
+                "tag": "penalty_curriculum",
+                "initial_scale": 0.1,
+                "min_scale": 0.0,
+                "max_scale": 1.0,
+                "level_down_threshold": 150.0,
+                "level_up_threshold": 750.0,
+                "degree": 0.00025,
+            },
+        ),
+    },
+    reset_terms={},
+    step_terms={},
+)
+
 __all__ = ["t1_29dof_curriculum", "t1_29dof_curriculum_fast_sac"]
+__all__ += ["t1_23dof_curriculum", "t1_23dof_curriculum_slope"]

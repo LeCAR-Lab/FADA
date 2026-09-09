@@ -69,6 +69,21 @@ class LayerConfig:
     module_input_name: tuple[str, ...] = ()
     """Input names for module. Only used for encoder modules."""
 
+    film_layers: List[int] | None = None
+    """Indices of hidden layers to modulate with FiLM. None -> all hidden layers."""
+
+    lora_layers: List[int] | None = None
+    """Indices of hidden layers to adapt with LoRA. None -> all hidden layers."""
+
+    lora_rank: int = 8
+    """LoRA rank (r) used when actor_fusion='lora'."""
+
+    lora_alpha: float = 16.0
+    """LoRA scaling factor (alpha) when actor_fusion='lora'."""
+
+    lora_dropout: float = 0.0
+    """LoRA dropout probability when actor_fusion='lora'."""
+
 
 @dataclass(frozen=True)
 class ModuleConfig:
@@ -102,6 +117,16 @@ class PPOModuleDictConfig:
 
     critic: ModuleConfig
     """Critic module configuration."""
+
+
+@dataclass(frozen=True)
+class PPOMultiModuleDictConfig:
+    """Separate actor-critic MLPs for lower and upper body (decoupled PPO)."""
+
+    actor_lower_body: ModuleConfig
+    critic_lower_body: ModuleConfig
+    actor_upper_body: ModuleConfig
+    critic_upper_body: ModuleConfig
 
 
 @dataclass(frozen=True)
@@ -180,6 +205,9 @@ class PPOConfig:
     init_at_random_ep_len: bool = True
     """Whether to initialize at random episode length."""
 
+    empirical_normalization: bool = False
+    """Whether to apply empirical normalization to actor and critic observations."""
+
     eval_callbacks: Any = None
     """Evaluation callbacks configuration."""
 
@@ -187,6 +215,100 @@ class PPOConfig:
     min_actor_learning_rate: float | None = None
     max_critic_learning_rate: float | None = None
     min_critic_learning_rate: float | None = None
+
+
+@dataclass(frozen=True)
+class PPOPlannerIDMConfig(PPOConfig):
+    """Configuration for online PPO finetuning of a planner-idm policy."""
+
+    planner_idm_checkpoint: str | None = None
+    """Path to the source planner-idm checkpoint used to initialize the actor."""
+
+    train_scope: str = "planner_only"
+    """Trainable LoRA scope: planner_only | planner_plus_idm | idm_only."""
+
+    planner_lora_target_scope: str = "planner_backbone_qkv"
+    """Planner LoRA target scope: planner_backbone | planner_backbone_qkv."""
+
+    idm_lora_target_scope: str = "encoder_decoder"
+    """IDM LoRA target scope: decoder_only | encoder_decoder | *_qkv variants."""
+
+    lora_r: int = 8
+    """LoRA rank."""
+
+    lora_alpha: float = 16.0
+    """LoRA scaling factor."""
+
+    lora_dropout: float = 0.0
+    """LoRA dropout probability."""
+
+    reference_action_anchor_coef: float = 0.0
+    """Optional action anchor coefficient against the frozen source policy."""
+
+    reference_planner_anchor_coef: float = 0.0
+    """Optional planner future-observation anchor coefficient against the frozen source policy."""
+
+    dr_scale: float = 1.0
+    """Global DR scale multiplier applied to supported randomization ranges."""
+
+    mass_dr_scale: float = 1.0
+    """Mass randomization scale multiplier."""
+
+    friction_dr_scale: float = 1.0
+    """Friction randomization scale multiplier."""
+
+    base_com_dr_scale: float = 1.0
+    """Base COM randomization scale multiplier."""
+
+    push_dr_scale: float = 1.0
+    """Push randomization scale multiplier."""
+
+    delay_dr_scale: float = 1.0
+    """Action-delay randomization scale multiplier."""
+
+    save_planner_idm_sidecars: bool = False
+    """Whether to additionally save planner-idm LoRA/merged sidecar checkpoints."""
+
+
+@dataclass(frozen=True)
+class PPOMAConfig:
+    """PPO with two Gaussian policies (lower / upper) and two value heads (FAR ``ppo_ma`` style)."""
+
+    module_dict: PPOMultiModuleDictConfig
+    body_keys: tuple[str, ...] = ("lower_body", "upper_body")
+    init_noise_std_lower_body: float = 0.8
+    init_noise_std_upper_body: float = 0.8
+
+    num_learning_epochs: int = 8
+    num_mini_batches: int = 4
+    clip_param: float = 0.2
+    gamma: float = 0.99
+    lam: float = 0.95
+    value_loss_coef: float = 1.0
+    entropy_coef: float = 0.01
+    actor_learning_rate: float = 1e-5
+    actor_optimizer: OptimizerConfig = field(default_factory=lambda: OptimizerConfig(_target_="torch.optim.AdamW"))
+    critic_learning_rate: float = 1e-5
+    critic_optimizer: OptimizerConfig = field(default_factory=lambda: OptimizerConfig(_target_="torch.optim.AdamW"))
+    max_grad_norm: float = 1.0
+    schedule: str = "adaptive"
+    desired_kl: float = 0.01
+    use_symmetry: bool = False
+    symmetry_actor_coef: float = 1.0
+    symmetry_critic_coef: float = 0.0
+    num_steps_per_env: int = 24
+    save_interval: int = 100
+    load_optimizer: bool = True
+    num_learning_iterations: int = 1000000
+    init_at_random_ep_len: bool = True
+    eval_callbacks: Any = None
+    max_actor_learning_rate: float | None = None
+    min_actor_learning_rate: float | None = None
+    max_critic_learning_rate: float | None = None
+    min_critic_learning_rate: float | None = None
+
+    log_raw_episode: bool = False
+    """Log unscaled per-term rewards (``raw_rew_*``) to console and TensorBoard."""
 
 
 @dataclass(frozen=True)
@@ -317,6 +439,20 @@ class PPOAlgoConfig:
     """Whether to recursively instantiate."""
 
     config: PPOConfig
+    """Algorithm-specific configuration for PPO-family algorithms."""
+
+
+@dataclass(frozen=True)
+class PPOMAAlgoConfig:
+    """Decoupled two-policy PPO (lower + upper body)."""
+
+    _target_: str
+    """Target algorithm class."""
+
+    _recursive_: bool
+    """Whether to recursively instantiate."""
+
+    config: PPOMAConfig
     """Algorithm-specific configuration."""
 
 

@@ -12,8 +12,8 @@ if TYPE_CHECKING:
 
 
 def get_timestamp() -> str:
-    """Get current timestamp in experiment format."""
-    return datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    """Get current timestamp in experiment format (local time)."""
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def get_experiment_dir(
@@ -58,7 +58,10 @@ def get_experiment_dir(
     if project or name:
         group = getattr(logger_config, "group", None)
         exp_name = f"{timestamp}-{name}-{group or task_name}"
-        return base_dir / project / exp_name
+        project_dir = base_dir / project
+        if task_name == "eval":
+            project_dir = project_dir / "eval"
+        return project_dir / exp_name
 
     # Fallback to simple structure
     return base_dir / "runs" / timestamp

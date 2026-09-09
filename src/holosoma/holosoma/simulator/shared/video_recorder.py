@@ -77,6 +77,8 @@ class VideoRecorderInterface(ABC):
         self._is_recording = False
         self._current_episode = 0
         self._total_episodes = 0
+        self._auto_recording_enabled = True
+        self._idle_notified = False
 
         # Shared frame buffer for all simulators
         self.video_frames: list[npt.NDArray[np.uint8]] = []
@@ -150,6 +152,15 @@ class VideoRecorderInterface(ABC):
     def enabled(self) -> bool:
         return self.config.enabled
 
+    def set_auto_recording_enabled(self, enabled: bool) -> None:
+        """Enable or disable episode-triggered auto recording."""
+        self._auto_recording_enabled = bool(enabled)
+
+    def reset_episode_counter(self) -> None:
+        """Reset episode numbering so the next recorded run starts from episode 1."""
+        self._current_episode = 0
+        self._total_episodes = 0
+
     def start_recording(self, episode_id: int) -> None:
         """Start recording for a specific episode.
 
@@ -169,6 +180,7 @@ class VideoRecorderInterface(ABC):
         """
         # Set recording state - this method now owns the recording flag
         self._is_recording = True
+        self._idle_notified = False
         self._start_recording(episode_id)
 
     def capture_frame(self, env_id: int = 0) -> None:
@@ -233,10 +245,11 @@ class VideoRecorderInterface(ABC):
             assert self.stop_recording_event is not None
             while not self.stop_recording_event.is_set():
                 # Check if we should stop recording this episode (moved outside render signal check)
-                if not self._is_recording and hasattr(self, "episode_complete_event"):
+                if not self._is_recording and not self._idle_notified and hasattr(self, "episode_complete_event"):
                     # Episode ended, signal completion and continue waiting for next episode
-                    logger.warning("Signalling: episode_complete_event")
+                    logger.debug("Signalling: episode_complete_event")
                     self.episode_complete_event.set()
+                    self._idle_notified = True
 
                 # Wait for signal to capture a frame. One second ought to be sufficient (1 FPS),
                 # otherwise misses frames. Ideally we increase robustness...
@@ -315,7 +328,7 @@ class VideoRecorderInterface(ABC):
         bool
             True if the episode should be recorded, False otherwise.
         """
-        if not self.config.enabled:
+        if not self.config.enabled or not self._auto_recording_enabled:
             return False
 
         return total_episodes % self.config.interval == 0
@@ -446,6 +459,9 @@ class VideoRecorderInterface(ABC):
                 output_format=self.config.output_format,
                 wandb_logging=self.config.upload_to_wandb,
                 episode_id=self._current_episode,
+                h264_crf=self.config.h264_crf,
+                h264_maxrate=self.config.h264_maxrate,
+                h264_preset=self.config.h264_preset,
             )
 
         except Exception as e:

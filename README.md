@@ -1,144 +1,229 @@
-# Holosoma
+<h1 align="center">FADA: Few-Shot Domain Adaptation via Dynamics Alignment for Humanoid Control</h1>
 
-Holosoma (Greek: "whole-body") is a comprehensive humanoid robotics framework for training and deploying reinforcement learning policies on humanoid robots, as well as motion retargeting. Supports locomotion (velocity tracking) and whole-body tracking tasks across multiple simulators (IsaacGym, IsaacSim, MJWarp, MuJoCo) with algorithms like PPO and FastSAC.
+<p align="center"><b>Conference on Robot Learning (CoRL) 2026</b></p>
 
-## Features
+<div align="center">
 
-- **Multi-simulator support**: IsaacGym, IsaacSim, MuJoCo Warp (MJWarp), and MuJoCo (inference only)
-- **Multiple RL algorithms**: PPO and FastSAC
-- **Robot support**: Unitree G1 and Booster T1 humanoids
-- **Task types**: Locomotion (velocity tracking) and whole-body tracking
-- **Sim-to-sim and sim-to-real deployment**: Shared inference pipeline across simulation and real robot control
-- **Motion retargeting**: Convert human motion capture data to robot motions while preserving interactions with objects and terrain
-- **Wandb integration**: Video logging, automatic ONNX checkpoint uploads, and direct checkpoint loading from Wandb
+[[Website]](https://lecar-lab.github.io/FADA-humanoid/)
+[[arXiv]](https://arxiv.org/abs/2606.28476)
+[[Video]](https://lecar-lab.github.io/FADA-humanoid/videos/fada-overview.mp4)
+
+<img src="assets/cmu-logo.png" height="80"/> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; <img src="assets/lecar-lab-logo.png" height="80"/>
+
+[![IsaacSim](https://img.shields.io/badge/IsaacSim-5.1.0-b.svg)](https://docs.isaacsim.omniverse.nvidia.com/) [![MuJoCo](https://img.shields.io/badge/MuJoCo-3.0%2B-b.svg)](https://mujoco.org/) [![Linux platform](https://img.shields.io/badge/Platform-linux--64-orange.svg)](https://releases.ubuntu.com/22.04/) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)](LICENSE)
+
+<img src="assets/teaser.gif" width="560"/>
+
+</div>
+
+**FADA** is a few-shot domain adaptation framework for humanoid control, adapting a trained
+policy to new real-world dynamics, e.g. a payload, a slope, unfamiliar terrain, using about two
+minutes of target-domain data, with no rewards, no motion capture, and no policy retraining.
+
+## Status
+
+- [x] Training code (oracle PPO + Planner-IDM DAgger distillation)
+- [x] Finetuning code (IDM LoRA on target-domain data)
+- [x] Sim2sim code (MuJoCo deployment and data collection)
+- [x] Sim2real code (real-robot deployment and data collection)
+- [x] Oracle checkpoints (T1, G1)
+- [ ] Whole-body tracking
+
+This repository is derived from [Holosoma](https://github.com/amazon-far/holosoma) (Apache-2.0, Amazon FAR).
+FADA's additions live under `src/holosoma/holosoma/fada/` and, on the inference side,
+`LocomotionPolicy_FADA`. This README covers the FADA pipeline only; the unchanged upstream
+subsystems have their own guides ([training](src/holosoma/README.md),
+[inference](src/holosoma_inference/README.md),
+[retargeting](src/holosoma_retargeting/holosoma_retargeting/README.md)), or see the
+[upstream repository](https://github.com/amazon-far/holosoma) itself.
 
 ## Repository Structure
 
 ```
 src/
-├── holosoma/              # Core training framework (locomotion & whole-body tracking)
-├── holosoma_inference/    # Inference and deployment pipeline
-└── holosoma_retargeting/  # Motion retargeting from human motion data to robots
+├── holosoma/              # Core training framework
+│   └── holosoma/fada/     # FADA: Planner-IDM model, DAgger training, IDM LoRA finetuning
+├── holosoma_inference/    # Inference and deployment (LocomotionPolicy_FADA)
+└── holosoma_retargeting/  # Motion retargeting (inherited from upstream)
 ```
 
-## Documentation
+## Setup
 
-- **[Training Guide](src/holosoma/README.md)** - Train locomotion and whole-body tracking policies in IsaacGym/IsaacSim
-- **[Inference & Deployment Guide](src/holosoma_inference/README.md)** - Deploy policies to real robots or evaluate in MuJoCo simulation
-- **[Retargeting Guide](src/holosoma_retargeting/README.md)** - Convert human motion capture data to robot motions
-
-## Quick Start
-
-### Setup
-
-Choose the appropriate setup script based on your use case:
+Each stage runs in its own environment. Install the ones the steps below use:
 
 ```bash
-# For IsaacGym training
-bash scripts/setup_isaacgym.sh
-
-# For IsaacSim training
+# IsaacSim, for FADA steps 1, 2, 3 and 5
 # Requires Ubuntu 22.04 or later due to IsaacSim dependencies
 bash scripts/setup_isaacsim.sh
 
-# For MJWarp training and MuJoCo simulation (inference)
+# MuJoCo, the simulator side of steps 4 and 6
 bash scripts/setup_mujoco.sh
 
-# For inference/deployment
+# ONNX inference, the policy side of steps 4 and 6
 bash scripts/setup_inference.sh
-
-# For motion retargeting
-bash scripts/setup_retargeting.sh
 ```
 
-### Training
+`scripts/setup_isaacgym.sh` and `scripts/setup_retargeting.sh` are also present, for the
+inherited subsystems above.
 
-Train a G1 robot with FastSAC on IsaacGym:
+Run every command below from the repository root, after sourcing the environment shown at
+the top of its block.
+
+## FADA Pipeline
+
+<img src="assets/framework.png" width="900"/>
+
+Six steps end to end: oracle training, DAgger distillation into a Planner-IDM student, evaluation
+and ONNX export, MuJoCo/hardware deployment and data collection, IDM finetuning, and a final
+pre/post comparison on identical command sequences.
+
+The commands below carry only your own paths. Every hyperparameter is a flag, so run any entry
+point with `--help` to see it.
+
+### 1. Train the oracle PPO expert
+
+Step 1 should use an **oracle** preset (`g1_29dof_oracle`, `t1_23dof_waist50_oracle`).
 
 ```bash
-source scripts/source_isaacgym_setup.sh
+source scripts/source_isaacsim_setup.sh
 python src/holosoma/holosoma/train_agent.py \
-    exp:g1-29dof-fast-sac \
-    simulator:isaacgym \
+    exp:g1_29dof_oracle \
+    simulator:isaacsim \
     logger:wandb \
-    --training.seed 1
+    --logger.base-dir logs/g1_oracle
+#    -> logs/g1_oracle/<oracle-run>/
 ```
 
-> **Note:** For headless servers, see the [training guide](src/holosoma/README.md#video-recording) for video recording configuration.
+For T1, swap in `exp:t1_23dof_waist50_oracle` and `--logger.base-dir logs/t1_oracle`.
 
-See the [Training Guide](src/holosoma/README.md) for more examples and configuration options.
+### 2. Train the FADA (Planner-IDM) student via DAgger
 
-### Quick Demo
-
-We provide scripts to run the complete pipeline: (data downloading and processing for LAFAN), retargeting, data conversion, and whole-body tracking policy training.
+`--expert-checkpoint` must point into a directory holding **every** intermediate `model_*.pt`
+from the oracle run. Released oracle checkpoints: <https://huggingface.co/AngchenXie/fada-checkpoints>.
+DAgger reward-samples twenty of them for its weak-policy data; pass `--suboptimal-data-ratio 0` to
+skip that source, and `--expert-checkpoint` only needs to point at the single checkpoint you
+want to imitate (e.g. the final one), not the full directory.
 
 ```bash
-# Run retargeting and whole-body tracking policy training using OMOMO data
-bash demo_scripts/demo_omomo_wb_tracking.sh
-
-# Run retargeting and whole-body tracking policy training using LAFAN data
-bash demo_scripts/demo_lafan_wb_tracking.sh
+python -m holosoma.fada.planner_idm.train \
+    --expert-checkpoint logs/g1_oracle/<oracle-run>/model_24999.pt
+#    -> <dagger-run>/, i.e. logs/g1_oracle/<oracle-run>_fada_dagger/<run>/
 ```
 
-### Deployment & Evaluation
+Same command for T1, just point `--expert-checkpoint` at your T1 oracle run.
 
-After training, deploy your policies:
+### 3. Evaluate the checkpoint and export ONNX
 
-- **Real Robot**: See [Real Robot Locomotion](src/holosoma_inference/docs/workflows/real-robot-locomotion.md) or [Real Robot WBT](src/holosoma_inference/docs/workflows/real-robot-wbt.md)
-- **MuJoCo Simulation**: See [Sim-to-Sim Locomotion](src/holosoma_inference/docs/workflows/sim-to-sim-locomotion.md) or [Sim-to-Sim WBT](src/holosoma_inference/docs/workflows/sim-to-sim-wbt.md)
+Check here that the DAgger student actually works, e.g. walks stably, before moving on to
+deployment.
 
-Or browse all deployment options in the [Inference & Deployment Guide](src/holosoma_inference/README.md).
+```bash
+python -m holosoma.fada.planner_idm.eval_checkpoint \
+    --checkpoint <dagger-run>/model_final.pt
+#    -> <dagger-run>/eval/dagger_eval/planner_idm_policy.onnx
+```
 
-### Demo Videos
+### 4. Deploy in MuJoCo and collect target-domain data
 
-Watch real-world deployments of Holosoma policies *(click thumbnails to play)*
+Two terminals. **Terminal A** is the simulator and its viewer:
 
-<table>
-  <tr>
-    <th>G1 Locomotion</th>
-    <th>T1 Locomotion</th>
-    <th>G1 Dancing</th>
-  </tr>
-  <tr>
-    <td width="33%">
-      <a href="https://youtu.be/YYMgj5BDIMI">
-        <img src="https://img.youtube.com/vi/YYMgj5BDIMI/hqdefault.jpg" width="100%" alt="▶ G1 Locomotion">
-      </a>
-    </td>
-    <td width="33%">
-      <a href="https://youtu.be/Q6rNHJZ2a6Y">
-        <img src="https://img.youtube.com/vi/Q6rNHJZ2a6Y/hqdefault.jpg" width="100%" alt="▶ T1 Locomotion">
-      </a>
-    </td>
-    <td width="33%">
-      <a href="https://youtu.be/ouPk69_eFfE">
-        <img src="https://img.youtube.com/vi/ouPk69_eFfE/hqdefault.jpg" width="100%" alt="▶ G1 Dancing">
-      </a>
-    </td>
-  </tr>
-</table>
+```bash
+source scripts/source_mujoco_setup.sh
+python src/holosoma/holosoma/run_sim.py robot:g1-29dof
+```
 
+For T1, use `robot:t1-23dof-waist-wrist`.
 
-## Issue Reporting
+The preset holds the robot on a virtual gantry, and it never releases itself. The viewer prints
+the keys: `8` lowers the robot, `7` raises it, `9` releases. Lower it until the feet reach the
+ground and take load, start **Terminal B**, and press `9` as the policy comes up; recording
+begins at the policy's first step.
 
-We welcome feedback and issue reports to help improve holosoma. Please use issues to:
+```bash
+source scripts/source_inference_setup.sh
+python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-loco-fada \
+    --task.model-path <dagger-run>/eval/dagger_eval/planner_idm_policy.onnx \
+    --task.seed 42 \
+    --task.max-steps 5000 \
+    --task.auto-start-policy \
+    --task.collect-data \
+    --task.log-output-dir logs/mujoco_collect/g1_loco
+#    -> logs/mujoco_collect/g1_loco/<timestamp>/dataset.h5
+```
 
-- Report bugs and technical issues
-- Request new features
+For T1, use `inference:t1-23dof-loco-fada` and `--task.log-output-dir logs/mujoco_collect/t1_loco`.
 
-## Support
+**On hardware, the same pipeline runs against the robot**: the H5 it collects feeds step 5 exactly
+as the MuJoCo one does, so the robot itself becomes the target domain. **Get the pipeline working
+in MuJoCo first.**
 
-If you need help with anything aside from issues feel free to join our [discord server](https://discord.gg/TPupMvpqHc).
+```bash
+python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-loco-fada \
+    --task.model-path <onnx> \
+    --task.interface eno1 \
+    --task.no-randomize-commands \
+    --task.collect-data \
+    --task.max-steps 5000
+```
 
-Use the discord to discuss larger plans and other more involved problems.
+No gantry, no Terminal A: `--task.interface` is the robot's network interface, and
+`--task.no-randomize-commands` turns off the MuJoCo preset's sampling so you drive it yourself,
+from a joystick or the keyboard.
 
-## Security
+Hardware setup and the control reference are in
+[`docs/workflows/real-robot-locomotion.md`](src/holosoma_inference/docs/workflows/real-robot-locomotion.md).
+For T1, use `inference:t1-23dof-loco-fada`, and follow the doc's procedure rather than the
+preset's: its T1 section uses `inference:t1-29dof-loco`, while FADA's T1 is 23-DoF.
 
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+### 5. Finetune the IDM on target-domain data
+
+```bash
+source scripts/source_isaacsim_setup.sh
+python -m holosoma.fada.planner_idm.finetune_idm_lora \
+    --checkpoint <dagger-run>/model_final.pt \
+    --target-datasets logs/mujoco_collect/g1_loco/<timestamp>/dataset.h5
+#    -> <dagger-run>/finetune/<sft-run>/planner_idm_policy.onnx
+```
+
+Same command for T1, just point `--target-datasets` at your T1 dataset.
+
+### 6. Collect matched pre-SFT and post-SFT rollouts
+
+This step produces the two rollouts a comparison would be made from; it does not compare them.
+What to measure, and how, is left to you.
+
+Run step 4's policy command twice, once per ONNX, with the same `--task.seed` and
+`--task.max-steps`, no `--task.collect-data`, and its own `--task.log-output-dir`:
+
+| Run | `--task.model-path` | `--task.log-output-dir` |
+|---|---|---|
+| pre-SFT | `<dagger-run>/eval/dagger_eval/planner_idm_policy.onnx` | `logs/step6/pre_sft` |
+| post-SFT | `<dagger-run>/finetune/<sft-run>/planner_idm_policy.onnx` | `logs/step6/post_sft` |
+
+In MuJoCo, restart Terminal A between the two runs and use the same gantry length for both.
+On hardware the equivalent is the same robot, the same starting pose, and the same command
+input. Each run writes `mocap_unified.npz` under `--task.log-output-dir`, recording base
+positions and orientations, the commands, and their timestamps.
 
 ## Citation
 
-If you use Holosoma in your research, please cite it according to the "Cite this repository" panel on the right sidebar of the Github repo.
+This repository is the code release for **FADA** (arXiv:2606.28476). If you use it in your
+research, please cite the paper:
+
+```bibtex
+@article{xie2026fada,
+  title   = {FADA: Few-Shot Domain Adaptation via Dynamics Alignment for Humanoid Control},
+  author  = {Xie, Angchen and Sobanbabu, Nikhil and Shikhare, Ishayu and Wang, Alan
+             and Simchowitz, Max and Shi, Guanya},
+  journal = {arXiv preprint arXiv:2606.28476},
+  year    = {2026},
+  doi     = {10.48550/arXiv.2606.28476}
+}
+```
+
+FADA is built on top of **Holosoma** (Amazon FAR, Apache-2.0), which provides the training,
+evaluation and deployment framework this work extends. Please cite it alongside FADA, using the
+"Cite this repository" panel on the [Holosoma repository](https://github.com/amazon-far/holosoma).
 
 ## License
 

@@ -5,10 +5,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import tyro
 from pydantic import model_validator
 from pydantic.dataclasses import dataclass
+from typing_extensions import Annotated
 
 from holosoma.config_types.viewer import ViewerConfig
+from holosoma.utils.sync_rendezvous import DEFAULT_POLICY_SYNC_PORT
 
 
 class MujocoBackend(str, Enum):
@@ -387,11 +390,11 @@ class SceneConfig:
     asset_root: str | None = None
     """Optional root directory for relative asset paths."""
 
-    scene_files: list[SceneFileConfig] | None = None  # Renamed from sources
-    """List of scene files (USD/URDF) to load."""
+    scene_files: Annotated[list[SceneFileConfig] | None, tyro.conf.Suppress] = None
+    """List of scene files (USD/URDF) to load. Set programmatically, not via CLI."""
 
-    rigid_objects: list[RigidObjectConfig] | None = None
-    """Standalone rigid objects to instantiate."""
+    rigid_objects: Annotated[list[RigidObjectConfig] | None, tyro.conf.Suppress] = None
+    """Standalone rigid objects to instantiate. Set programmatically, not via CLI."""
 
     env_spacing: float = 20.0
     """Distance between parallel environments in the grid layout."""
@@ -466,6 +469,42 @@ class BridgeConfig:
     # ROS settings
     use_ros: bool = False
     """Whether to use ROS for communication."""
+
+    # Ground-truth pose publishing for inference logging
+    publish_truth_pose: bool = False
+    """Publish ground-truth base pose over ZMQ for external velocity estimators."""
+
+    truth_zmq_port: int = 6000
+    """ZMQ port used for publishing ground-truth pose."""
+
+    clock_zmq_port: int = 5555
+    """ZMQ PUB port for sim clock sync. Must differ for each concurrent simulator process."""
+
+    truth_pose_name: str = "base"
+    """Name tag included in published pose messages."""
+
+
+@dataclass(frozen=True)
+class PredictionTwinVizConfig:
+    """Configuration for simulator-side transformer prediction twin visualization."""
+
+    enabled: bool = False
+    """Whether to enable twin visualization subscriber and rendering."""
+
+    sub_url: str = "tcp://127.0.0.1:6001"
+    """ZMQ SUB endpoint used by simulator to receive chunk twin packets."""
+
+    show_obs_prediction: bool = True
+    """Whether to render observation-prediction twin trajectory when provided."""
+
+    render_mode: str = "foot_com"
+    """Rendering mode: 'skeleton' (full robot ghost) or 'foot_com' (feet + COM trajectories)."""
+
+    max_horizon_frames: int = 10
+    """Maximum number of horizon frames rendered per twin trajectory."""
+
+    max_packet_age_sec: float = 0.5
+    """Drop packets older than this threshold (seconds) to avoid stale twins."""
 
 
 @dataclass(frozen=True)
@@ -546,8 +585,137 @@ class SimulatorInitConfig:
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
     """Robot SDK bridge configuration."""
 
+    prediction_twin_viz: PredictionTwinVizConfig = field(default_factory=PredictionTwinVizConfig)
+    """Transformer chunk/obs prediction twin visualization settings (MuJoCo run_sim)."""
+
     virtual_gantry: VirtualGantryCfg = field(default_factory=VirtualGantryCfg)
     """Virtual gantry system configuration."""
+
+    control_zmq_port: int = -1
+    """ZMQ REP port for programmatic sim control (gantry, reset, etc.).
+
+    When > 0, the direct-simulation loop binds a ZMQ REP socket on this port
+    and accepts JSON commands from an external orchestrator.  Set to -1 (default)
+    to disable.
+
+    Command line usage:
+        --simulator.config.control-zmq-port=6100
+    """
+
+    policy_sync_zmq_port: int = DEFAULT_POLICY_SYNC_PORT
+    """ZMQ PAIR port for synchronous policy-simulator stepping (on by default).
+
+    When > 0, the direct-simulation loop binds a loopback ZMQ PAIR socket on
+    this port and uses lock-step synchronization with the policy process
+    instead of wall-clock rate limiting.  The policy sends its rl_rate in a
+    handshake message; the sim then batches ``fps / rl_rate`` physics steps per
+    policy step and exchanges DONE / STEP messages, so the number of physics
+    steps per policy action is fixed by configuration and does not depend on
+    the simulator's achieved throughput.
+
+    The default is derived from the current user id -- see
+    ``holosoma/utils/sync_rendezvous.py`` for why it is per-user rather than a
+    single fixed number, and for the matching policy-side default.  A simulator
+    started while that port is already bound fails immediately with a message
+    naming the override flags; it never falls back to a shared port.
+
+    Set to -1 to disable and use wall-clock rate limiting.
+
+    Command line usage:
+        --simulator.config.policy-sync-zmq-port=6200
+        --simulator.config.policy-sync-zmq-port=-1   # opt out of lock-step
+    """
+
+    link_mass_scale: float = 1.0
+    """Scale factor for robot link masses in MuJoCo (default: 1.0).
+    
+    Multiplies all robot body masses by this factor after model compilation.
+    Example: 1.5 means all link masses become 1.5x their original values.
+    
+    This only applies to MuJoCo simulator. For other simulators, this field is ignored.
+    
+    Command line usage:
+        --simulator.config.link-mass-scale=1.5
+    """
+
+    link_payloads: dict[str, float] | None = None
+    """Optional inline MuJoCo link/body payload masses.
+
+    Maps link/body name to added mass in kilograms. Each entry resolves
+    directly to a MuJoCo body and adds the specified payload.
+
+    Command line usage:
+        --simulator.config.link-payloads="{'left_wrist_yaw_link': 1.5, 'right_wrist_yaw_link': 1.5}"
+    """
+
+    link_payload_config_path: str | None = None
+    """Optional JSON file with fixed MuJoCo link/body payload masses.
+
+    The file should contain either:
+    - ``{"link_payloads": [{"link": "...", "added_mass": 1.5}, ...]}``
+    - or a simple ``{"body_name": 1.5, ...}`` mapping.
+
+    Each payload entry resolves directly to a MuJoCo body and adds
+    ``added_mass`` kilograms to that body.
+
+    Command line usage:
+        --simulator.config.link-payload-config-path=/abs/path/link_payloads.json
+    """
+
+    joint_payloads: dict[str, float] | None = None
+    """Legacy inline MuJoCo joint payload masses.
+
+    Maps joint name to added mass in kilograms. Each joint resolves to its
+    owning body in the compiled MuJoCo model and adds the specified payload.
+    Prefer ``link_payloads`` for new configs.
+
+    Command line usage:
+        --simulator.config.joint-payloads="{'left_wrist_yaw_joint': 1.5, 'right_wrist_yaw_joint': 1.5}"
+    """
+
+    joint_payload_config_path: str | None = None
+    """Legacy JSON file with fixed MuJoCo joint payload masses.
+
+    The file should contain either:
+    - ``{"joint_payloads": [{"joint": "...", "added_mass": 1.5}, ...]}``
+    - or a simple ``{"joint_name": 1.5, ...}`` mapping.
+
+    Each payload entry resolves the joint to its owning body in the compiled
+    MuJoCo model and adds ``added_mass`` kilograms to that body.
+    Prefer ``link_payload_config_path`` for new configs.
+
+    Command line usage:
+        --simulator.config.joint-payload-config-path=/abs/path/joint_payloads.json
+    """
+
+    deploy_ee_force_left: dict[str, float] | None = None
+    """Constant external force at the left wrist link in MuJoCo deploy (sim2sim).
+
+    Keys: ``'x'``, ``'y'``, ``'z'`` (Newtons, world frame). Written into MuJoCo's
+    ``xfrc_applied`` slot every physics substep. The target body is resolved from
+    ``left_wrist_yaw_link`` first and falls back to ``left_hand_link`` for robots
+    such as T1-23DoF. Force persists until overwritten. ``None`` disables.
+
+    Pairs with force-adaptive deploy: a trained policy that's force-blind by
+    design (privileged-only critic) can be tested for passive adaptation via an
+    external EE force. MuJoCo only — IsaacGym/IsaacSim training applies
+    per-env external forces via the simulator's own Jacobian /
+    rigid-body-force API instead (see ``jacobian`` and
+    ``apply_rigid_body_force_at_pos_tensor`` on the simulator classes).
+
+    Command line usage:
+        --simulator.config.deploy-ee-force-left="{'x':0,'y':0,'z':-30}"
+    """
+
+    deploy_ee_force_right: dict[str, float] | None = None
+    """Constant external force at the right wrist link in MuJoCo deploy (sim2sim).
+
+    Same semantics as ``deploy_ee_force_left`` for ``right_wrist_yaw_link`` with
+    fallback to ``right_hand_link``.
+
+    Command line usage:
+        --simulator.config.deploy-ee-force-right="{'x':0,'y':0,'z':-30}"
+    """
 
 
 @dataclass(frozen=True)

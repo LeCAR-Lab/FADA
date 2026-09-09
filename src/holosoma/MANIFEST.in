@@ -3,3 +3,22 @@ recursive-include holosoma *.urdf
 recursive-include holosoma *.yaml
 recursive-include holosoma *.npz
 recursive-include holosoma *.obj
+
+# Everything the package resolves at runtime from inside itself lives under
+# `holosoma/data`: the robot assets that `simulator/mujoco/scene_manager.py` loads by
+# joining `robot_config.asset.asset_root` ("@holosoma/data/robots", rewritten to the
+# installed package directory) with `asset.xml_file`, and the `holosoma/data/motions/...`
+# paths that `utils/path.py`'s `resolve_data_file_path` resolves package-relative. The
+# directory is named here rather than a set of file extensions.
+graft holosoma/data
+
+# The IsaacSim URDF->USD conversion caches are generated into the source tree by a
+# training or eval run, are `.gitignore`d, and hold absolute paths from the machine that
+# built them.
+prune holosoma/data/robots/converted
+prune holosoma/data/robots/converted_rank*
+
+# Bytecode caches, which `graft` would otherwise collect from a source tree that has been
+# run from.
+global-exclude __pycache__/*
+global-exclude *.py[cod]

@@ -51,15 +51,15 @@ class SimulatorBridge:
         self.bridge_config: BridgeConfig = bridge_config
         self.robot_bridge: BasicSdk2Bridge | None = None
 
-        # Initialize clock publisher for WBT motion synchronization
-        self.clock_pub: ClockPub = ClockPub()
-
         if self.bridge_config.interface is None:
             interface = self._auto_detect_interface()
             logger.info(f"Auto-detected bridge interface '{interface}'")
             self.bridge_config = replace(self.bridge_config, interface=interface)
 
-        if bridge_config.enabled:
+        # Clock publisher: port must be unique per concurrent sim (parallel collects / grid jobs).
+        self.clock_pub: ClockPub = ClockPub(port=self.bridge_config.clock_zmq_port)
+
+        if self.bridge_config.enabled:
             logger.info("Robot bridge is enabled, initializing...")
             self._init_robot_bridge()
             # Start clock publisher for motion synchronization

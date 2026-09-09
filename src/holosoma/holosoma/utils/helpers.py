@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from types import SimpleNamespace
 from typing import Any, Type
 
 from holosoma.utils.safe_torch_import import torch
@@ -55,27 +56,35 @@ def instantiate(config: Any, **kwargs: Any) -> Any:
     >>> config = OptimizerConfig(_target_="torch.optim.AdamW", weight_decay=0.001)
     >>> optimizer = instantiate(config, params=model.parameters(), lr=0.001)
     """
-    if not hasattr(config, "_target_"):
-        raise ValueError(f"Config must have a '_target_' attribute, got: {config}")
+    if isinstance(config, dict):
+        if "_target_" not in config:
+            raise ValueError(f"Config dict must have a '_target_' key, got: {config}")
+        target_class = get_class(config["_target_"])
+        config_dict = {k: v for k, v in config.items() if k != "_target_"}
+    else:
+        if not hasattr(config, "_target_"):
+            raise ValueError(f"Config must have a '_target_' attribute, got: {config}")
+        target_class = get_class(config._target_)
 
-    target_class = get_class(config._target_)
+        config_dict = {}
+        if hasattr(config, "__dict__"):
+            config_dict = {k: v for k, v in config.__dict__.items() if not k.startswith("_")}
+        elif hasattr(config, "__dataclass_fields__"):
+            # For dataclasses
+            import dataclasses
 
-    # Extract all config attributes except _target_
-    config_dict = {}
-    if hasattr(config, "__dict__"):
-        config_dict = {k: v for k, v in config.__dict__.items() if not k.startswith("_")}
-    elif hasattr(config, "__dataclass_fields__"):
-        # For dataclasses
-        import dataclasses
-
-        config_dict = {
-            field.name: getattr(config, field.name)
-            for field in dataclasses.fields(config)
-            if not field.name.startswith("_")
-        }
+            config_dict = {
+                field.name: getattr(config, field.name)
+                for field in dataclasses.fields(config)
+                if not field.name.startswith("_")
+            }
 
     # Merge config args with kwargs (kwargs take precedence)
     merged_kwargs = {**config_dict, **kwargs}
+
+    # If there is a nested "config" dict, turn it into attribute-style access
+    if "config" in merged_kwargs and isinstance(merged_kwargs["config"], dict):
+        merged_kwargs["config"] = SimpleNamespace(**merged_kwargs["config"])
 
     return target_class(**merged_kwargs)
 

@@ -6,6 +6,21 @@ from holosoma.managers.observation.terms.locomotion import get_projected_gravity
 from holosoma.utils.safe_torch_import import torch
 
 
+def _false_mask(env) -> torch.Tensor:
+    return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+
+def _resolve_optional_termination_flag(env, flag_name: str, default: bool) -> bool:
+    """Resolve optional legacy termination flags without requiring env.config."""
+    env_cfg = getattr(env, "config", None)
+    if env_cfg is None:
+        return default
+    termination_cfg = getattr(env_cfg, "termination", None)
+    if termination_cfg is None:
+        return default
+    return bool(getattr(termination_cfg, flag_name, default))
+
+
 def _apply_probability(mask: torch.Tensor, probability: float, device: torch.device) -> torch.Tensor:
     """Optionally apply probabilistic gating to a mask."""
     if probability >= 1.0:
@@ -29,28 +44,57 @@ def contact_forces_exceeded(
     return torch.any(torch.norm(contact_forces, dim=-1) > force_threshold, dim=1)
 
 
-def gravity_tilt_exceeded(env, threshold_x: float, threshold_y: float) -> torch.Tensor:
+def gravity_tilt_exceeded(env, threshold_x: float, threshold_y: float, enabled: bool = True) -> torch.Tensor:
     """Terminate if projected gravity exceeds roll/pitch thresholds."""
-    if not getattr(env.config.termination, "terminate_by_gravity", False):
-        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if not enabled:
+        return _false_mask(env)
+    if not _resolve_optional_termination_flag(env, "terminate_by_gravity", True):
+        return _false_mask(env)
     grav = get_projected_gravity(env)
     tilt_x = torch.abs(grav[:, 0]) > threshold_x
     tilt_y = torch.abs(grav[:, 1]) > threshold_y
     return tilt_x | tilt_y
 
 
-def base_height_below_threshold(env, min_height: float) -> torch.Tensor:
-    """Terminate if base height drops below threshold."""
-    if not getattr(env.config.termination, "terminate_by_low_height", False):
-        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    base_height = env.simulator.robot_root_states[:, 2]
+def base_height_below_threshold(
+    env, min_height: float, enabled: bool = True, use_terrain_relative: bool = True
+) -> torch.Tensor:
+    """Terminate if base height drops below threshold.
+
+    By default the check is terrain-relative (`terrain_base_height`) when terrain
+    metadata is available, which is more robust on uneven terrain.
+    """
+    if not enabled:
+        return _false_mask(env)
+    if not _resolve_optional_termination_flag(env, "terminate_by_low_height", True):
+        return _false_mask(env)
+
+    root_states = getattr(env.simulator, "robot_root_states", None)
+    # IsaacGym exposes a Tensor directly, while IsaacSim may expose a proxy wrapper.
+    # Unwrap when available so downstream shape/indexing is backend-agnostic.
+    root_states = getattr(root_states, "tensor_xyzw", root_states)
+    if root_states is None or root_states.shape[1] < 3:
+        return _false_mask(env)
+
+    base_height = root_states[:, 2]
+    if use_terrain_relative:
+        terrain_manager = getattr(env, "terrain_manager", None)
+        terrain_get_state = getattr(terrain_manager, "get_state", None)
+        terrain_state = terrain_get_state("locomotion_terrain") if callable(terrain_get_state) else None
+        terrain_base_heights = getattr(terrain_state, "base_heights", None) if terrain_state is not None else None
+        if terrain_base_heights is not None:
+            # terrain_base_heights is already root-to-ground clearance.
+            base_height = terrain_base_heights.to(device=env.device, dtype=base_height.dtype).reshape(env.num_envs, -1)[
+                :, 0
+            ]
+
     return base_height < min_height
 
 
 def dof_position_limit_exceeded(env, probability: float = 1.0) -> torch.Tensor:
     """Terminate when DOF position limits are exceeded."""
-    if not getattr(env.config.termination, "terminate_when_close_to_dof_pos_limit", False):
-        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if not _resolve_optional_termination_flag(env, "terminate_when_close_to_dof_pos_limit", False):
+        return _false_mask(env)
     lower_violation = -(env.simulator.dof_pos - env.simulator.dof_pos_limits_termination[:, 0]).clip(max=0.0)
     upper_violation = (env.simulator.dof_pos - env.simulator.dof_pos_limits_termination[:, 1]).clip(min=0.0)
     violation = torch.sum(lower_violation + upper_violation, dim=1) > 0.0
@@ -59,8 +103,8 @@ def dof_position_limit_exceeded(env, probability: float = 1.0) -> torch.Tensor:
 
 def dof_velocity_limit_exceeded(env, probability: float = 1.0) -> torch.Tensor:
     """Terminate when DOF velocity limits are exceeded."""
-    if not getattr(env.config.termination, "terminate_when_close_to_dof_vel_limit", False):
-        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if not _resolve_optional_termination_flag(env, "terminate_when_close_to_dof_vel_limit", False):
+        return _false_mask(env)
     delta = (
         torch.abs(env.simulator.dof_vel)
         - env.dof_vel_limits * env.config.termination_scales.termination_close_to_dof_vel_limit
@@ -71,8 +115,8 @@ def dof_velocity_limit_exceeded(env, probability: float = 1.0) -> torch.Tensor:
 
 def torque_limit_exceeded(env, probability: float = 1.0) -> torch.Tensor:
     """Terminate when actuator torques exceed limits."""
-    if not getattr(env.config.termination, "terminate_when_close_to_torque_limit", False):
-        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if not _resolve_optional_termination_flag(env, "terminate_when_close_to_torque_limit", False):
+        return _false_mask(env)
     torques = env.action_manager.get_term("joint_control").torques
     delta = (
         torch.abs(torques) - env.torque_limits * env.config.termination_scales.termination_close_to_torque_limit

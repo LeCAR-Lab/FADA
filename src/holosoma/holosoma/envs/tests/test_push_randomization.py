@@ -2,10 +2,19 @@
 
 These tests verify that:
 1. Push velocities are properly applied to the simulator and cause actual robot motion
-2. The _update_tasks_callback is called before reset_envs_idx (critical ordering)
+2. Pushed robots move measurably further than unpushed ones after the push
 
-Note: All tests share a single simulator instance via pytest fixture to avoid
-Isaac Gym re-initialization issues.
+Note: All tests share a single simulator instance via the module-scoped `shared_env`
+fixture below, so this module creates exactly ONE Isaac Gym instance no matter how many
+tests it contains.
+
+Both tests carry the repo's `isaacsim` marker -- the same one `envs/tests/test_e2e.py`
+uses -- so `-m "not isaacsim"` deselects them on a checkout with no simulator, and a
+machine that has one runs them.
+
+The multi-instance limitation is a property of the SELECTION, not of these tests: running
+this module in the same process as `envs/tests/test_e2e.py` (which also builds a real env)
+is what creates two instances. Run them separately.
 """
 
 import dataclasses
@@ -45,7 +54,7 @@ def shared_env():
         # Cleanup happens automatically when context exits
 
 
-@pytest.mark.skip(reason="Cannot run multiple Isaac Gym instances in a single process")
+@pytest.mark.isaacsim
 def test_push_applies_state_tensor_to_simulator(shared_env):
     """Test that set_actor_root_state_tensor_robots is called when pushing.
 
@@ -100,7 +109,7 @@ def test_push_applies_state_tensor_to_simulator(shared_env):
     print(f"✓ set_actor_root_state_tensor_robots was called {call_count[0]} time(s) during push")
 
 
-@pytest.mark.skip(reason="Cannot run multiple Isaac Gym instances in a single process")
+@pytest.mark.isaacsim
 def test_push_causes_robot_motion(shared_env):
     """Test #2: Verify pushes result in actual robot movement in simulation.
 

@@ -4,6 +4,8 @@ from dataclasses import field
 
 from pydantic.dataclasses import dataclass
 
+from holosoma.config_types.motion import MotionLibConfig
+
 
 @dataclass(frozen=True)
 class RobotBridgeConfig:
@@ -62,6 +64,9 @@ class RobotAssetConfig:
     mesh_root: str | None = None
     density: float | None = None
     disable_gravity: bool | None = None
+    # Foot STL stems (without extension) used by foothold sampling.
+    left_foot_mesh: str = "left_ankle_roll_link"
+    right_foot_mesh: str = "right_ankle_roll_link"
 
 
 @dataclass(frozen=True)
@@ -137,9 +142,31 @@ class RobotConfig:
     symmetry_joint_names: dict[str, str] | None = None
     flip_sign_joint_names: list[str] | None = None
 
+    # ``penalty_stance_symmetry`` indices (positions in ``dof_names``).
+    # ``_no`` = matched-sign DOF pairs (||q_l - q_r||), ``_op`` = opposing-sign pairs
+    # (||q_l + q_r||). Populated for G1 to match an external reference robot yaml; leave
+    # ``None`` for robots without a reference baseline — penalty_stance_symmetry no-ops
+    # in that case.
+    symmetric_lower_left_dofs_idx_no: list[int] | None = None
+    symmetric_lower_right_dofs_idx_no: list[int] | None = None
+    symmetric_lower_left_dofs_idx_op: list[int] | None = None
+    symmetric_lower_right_dofs_idx_op: list[int] | None = None
+
     apply_dof_armature_in_isaacgym: bool = True
     knee_joint_min_threshold: float = 0.2
     lidar_height_offset: float = 0.5
 
     soft_dof_pos_limit: float = 0.95
     termination_close_to_dof_pos_limit: float = 0.98
+
+    motion: MotionLibConfig | None = None
+    """Motion library configuration (used by whole-body tracking for AMASS-driven motion refs)."""
+
+    lower_body_torque_penalty_dof_names: list[str] | None = None
+    """If set, lower-body DOF-torque penalty sums only these DOFs; ``None`` means all ``lower_dof_names``."""
+
+    lower_body_vel_penalty_dof_names: list[str] | None = None
+    """If set, lower-body DOF-velocity penalty uses only these joints (FAR ``lower_body_vel_penalty_dof_names``)."""
+
+    lower_body_acc_penalty_dof_names: list[str] | None = None
+    """If set, lower-body DOF-acceleration penalty uses only these joints."""

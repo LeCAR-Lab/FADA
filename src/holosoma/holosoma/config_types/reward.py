@@ -35,3 +35,20 @@ class RewardManagerCfg:
 
     only_positive_rewards: bool = False
     """If ``True``, clip the total reward to be non-negative."""
+
+
+@dataclass(frozen=True)
+class MultiAgentRewardTermCfg(RewardTermCfg):
+    """Reward term with routing for decoupled (multi-policy) PPO."""
+
+    ma_reward_group: str | None = None
+    """``lower_body``, ``upper_body``, or ``shared`` (both agents).
+    ``None`` is treated as ``shared`` when using :class:`MultiAgentRewardManagerCfg`."""
+
+
+@dataclass(frozen=True)
+class MultiAgentRewardManagerCfg(RewardManagerCfg):
+    """Reward manager config that fills per-body buffers for PPO-MA."""
+
+    multi_agent_body_keys: tuple[str, ...] | None = None
+    """E.g. ``(\"lower_body\", \"upper_body\")``; requires :class:`MultiAgentRewardManager`."""

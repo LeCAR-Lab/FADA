@@ -188,7 +188,7 @@ class SymmetryUtils:
             dtype=torch.float,
         )
 
-    def augment_observations(self, obs: torch.Tensor, env: Any, obs_list: Sequence[str]) -> torch.Tensor:
+    def augment_observations(self, obs: torch.Tensor, env: Any, obs_list: Sequence[str | int]) -> torch.Tensor:
         """Applies x-z plane symmetry transformation for observation data augmentation.
 
         Parameters
@@ -198,9 +198,11 @@ class SymmetryUtils:
             Contains robot state observations to be augmented.
         env : object
             Environment object (passed for compatibility).
-        obs_list : Sequence[str]
-            List of observation component names to process.
-            Example: ["actor_obs"] or ["actor_state_obs", "perception_obs"].
+        obs_list : Sequence[str | int]
+            List of observation component names or dimensions to process.
+            String keys are observation group names (e.g., "actor_obs") that will be mirrored.
+            Integer values are direct dimensions (e.g., 64) that will be skipped (not mirrored).
+            Example: ["actor_obs"] or ["actor_obs", 64] or ["actor_state_obs", "perception_obs"].
 
         Returns
         -------
@@ -229,7 +231,7 @@ class SymmetryUtils:
         mirrored_actions = self.mirror_action_xz_plane(actions)
         return torch.cat((actions, mirrored_actions), dim=0)
 
-    def mirror_xz_plane(self, observation: torch.Tensor, env: Any, obs_list: Sequence[str]) -> torch.Tensor:
+    def mirror_xz_plane(self, observation: torch.Tensor, env: Any, obs_list: Sequence[str | int]) -> torch.Tensor:
         """Performs x-z plane symmetry transformation on observation tensor.
 
         This function parses the observation tensor and applies appropriate mirroring
@@ -242,8 +244,10 @@ class SymmetryUtils:
             Contains concatenated observation components as specified in obs_list.
         env : object
             Environment object (passed for compatibility).
-        obs_list : List[str]
-            List of observation component names that define the structure of the observation tensor.
+        obs_list : Sequence[str | int]
+            List of observation component names or dimensions that define the structure of the observation tensor.
+            String keys are observation group names (e.g., "actor_obs") that will be mirrored.
+            Integer values are direct dimensions (e.g., 64) that will be skipped (not mirrored).
 
         Returns
         -------
@@ -259,6 +263,21 @@ class SymmetryUtils:
         idx = 0
 
         for obs_key in obs_list:
+            # Handle integer dimensions (direct numeric inputs, e.g., latent-vector placeholders)
+            if isinstance(obs_key, (int, float)):
+                # Integer dimensions don't need mirroring, just skip them
+                cur_obs_length = int(obs_key)
+                # No mirroring applied, just advance the index
+                idx += cur_obs_length
+                continue
+
+            # Handle string observation group names
+            if obs_key not in self.observation_dims:
+                raise KeyError(
+                    f"Observation key '{obs_key}' not found in observation_dims. "
+                    f"Available keys: {list(self.observation_dims.keys())}"
+                )
+
             cur_obs_length = self.observation_dims[obs_key]
             mirrored_obs = mirrored_obs_all[..., idx : idx + cur_obs_length]
             # Reshape to [batch, history_length, single_frame_obs_dim]

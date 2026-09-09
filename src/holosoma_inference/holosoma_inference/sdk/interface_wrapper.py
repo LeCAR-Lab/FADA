@@ -5,6 +5,7 @@ from termcolor import colored
 from holosoma_inference.config.config_types import RobotConfig
 from holosoma_inference.sdk.command_sender import create_command_sender
 from holosoma_inference.sdk.state_processor import create_state_processor
+from holosoma_inference.sdk.vel_state_processor import create_vel_state_processor
 
 
 class InterfaceWrapper:
@@ -23,13 +24,14 @@ class InterfaceWrapper:
     # Initialization
     # ============================================================================
 
-    def __init__(self, robot_config: RobotConfig, domain_id=0, interface_str=None, use_joystick=True):
+    def __init__(self, robot_config: RobotConfig, domain_id=0, interface_str=None, use_joystick=True, task_config=None):
         self.logger = logger
         self.use_joystick = use_joystick
         self.robot_config = robot_config
         self.domain_id = domain_id
         self.interface_str = interface_str
         self.sdk_type = robot_config.sdk_type
+        self.task_config = task_config
         self.backend = None
 
         # Initialize gain levels for binding backend
@@ -38,6 +40,7 @@ class InterfaceWrapper:
 
         # Initialize sdk components
         self._init_sdk_components()
+        self._init_vel_state_processor()
 
     def _init_sdk_components(self):
         """Initialize the appropriate backend based on SDK type."""
@@ -78,6 +81,14 @@ class InterfaceWrapper:
         if self.use_joystick:
             self._setup_wireless_controller()
 
+    def _init_vel_state_processor(self):
+        """Initialize optional velocity state processor (truth estimates)."""
+        try:
+            self.vel_state_processor = create_vel_state_processor(self.task_config) if self.task_config else None
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(f"Failed to initialize velocity state processor: {exc}")
+            self.vel_state_processor = None
+
     # ============================================================================
     # Robot State and Command Interface
     # ============================================================================
@@ -89,6 +100,18 @@ class InterfaceWrapper:
         if self.backend == "binding":
             return self._convert_binding_state_to_array()
         raise RuntimeError("InterfaceWrapper not initialized correctly.")
+
+    def get_vel_state(self):
+        """Get the latest ground-truth base linear/angular velocity if available."""
+        if getattr(self, "vel_state_processor", None) is None:
+            return None
+        return self.vel_state_processor.get_vel_state()
+
+    def get_pose_state(self):
+        """Get the latest ground-truth base pose (position and quaternion) if available."""
+        if getattr(self, "vel_state_processor", None) is None:
+            return None
+        return self.vel_state_processor.get_pose_state()
 
     def _convert_binding_state_to_array(self):
         """Convert binding LowState to numpy array format compatible with sdk2py."""
@@ -326,6 +349,17 @@ class InterfaceWrapper:
     # ============================================================================
     # Gain Management
     # ============================================================================
+
+    def update_config(self, robot_config: RobotConfig):
+        """
+        Update the robot configuration and propagate to internal components.
+
+        Called when KP/KD are resolved from ONNX metadata so that command_sender
+        and other components use the updated motor_kp/motor_kd.
+        """
+        self.robot_config = robot_config
+        if self.backend == "sdk2py":
+            self.command_sender.config = robot_config
 
     @property
     def kp_level(self):

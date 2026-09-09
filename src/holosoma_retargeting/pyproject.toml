@@ -6,8 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "holosoma-retargeting"
 version = "0.1.0"
 description = "Retargeting utilities for converting human motions to robot motions."
-readme = "README.md"
-requires-python = ">=3.10"
+# The package README, one level down beside the code; there is no
+# `src/holosoma_retargeting/README.md`.
+readme = "holosoma_retargeting/README.md"
+# >=3.11 follows from the `numpy==2.3.5` pin below: PyPI's NumPy 2.3.x declares
+# `Requires-Python: >=3.11`, so on 3.10 this dependency set is unsatisfiable.
+# `scripts/setup_retargeting.sh` also creates 3.11.
+requires-python = ">=3.11"
 authors = [
     { name = "Amazon FAR Team" },
 ]
@@ -17,7 +22,12 @@ dependencies = [
     # "TypeError: only 0-dimensional arrays can be converted to Python scalars"
     # in yourdf/urdf.py::1078 when converting float(q)
     "numpy==2.3.5",
-    "torch",
+    # >=2.6 is a security floor. `holosoma_retargeting/src/utils.py` calls a bare
+    # `torch.load(file_path, map_location="cpu")` on an InterMimic `.pt` the README has
+    # the reader download from a third party. PyTorch 2.6 flipped `torch.load`'s
+    # `weights_only` default from False to True, so at this floor that call is restricted
+    # and a malicious reducer is refused; below 2.6 the pickle stream executes.
+    "torch>=2.6",
     "tqdm",
     "scipy",
     "matplotlib",
@@ -39,3 +49,10 @@ dev = ["mypy", "ruff", "pytest"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["holosoma_retargeting*"]
+# `data_utils/` has no `__init__.py`, which alone does not keep it out of the wheel:
+# discovery through this table enables namespace packages by default, so
+# `holosoma_retargeting.data_utils` matches the `holosoma_retargeting*` glob above. Both
+# lines below are load-bearing: `namespaces = false` restores the `__init__.py` rule, and
+# the explicit exclude keeps the directory out even if an `__init__.py` is added later.
+namespaces = false
+exclude = ["holosoma_retargeting.data_utils*"]

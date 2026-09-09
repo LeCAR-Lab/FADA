@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from holosoma.config_types.terrain import MeshType, TerrainManagerCfg, TerrainTermCfg
 
 terrain_locomotion_plane = TerrainManagerCfg(
@@ -57,6 +59,20 @@ terrain_load_obj = TerrainManagerCfg(
         func="holosoma.managers.terrain.terms.locomotion:TerrainLocomotion",
         obj_file_path="holosoma/data/motions/g1_29dof/whole_body_tracking/terrain_parkour.obj",
     )
+)
+
+# FADA: `horizontal_scale` doubles as the raycast-grid spacing for `base_heights`
+# (managers/terrain/terms/locomotion.py): max_range=0.15 -> num_points =
+# int(0.3/scale)+1, so scale=1.0 puts only 1 point in the 30 cm window and
+# `interquartile_mean` returns NaN -> base_height / tracking_stance_base_height
+# become NaN and PPO-MA skips every minibatch. Set plane to 0.1 and mix to 0.2.
+terrain_locomotion_plane = replace(
+    terrain_locomotion_plane,
+    terrain_term=replace(terrain_locomotion_plane.terrain_term, horizontal_scale=0.1),
+)
+terrain_locomotion_mix = replace(
+    terrain_locomotion_mix,
+    terrain_term=replace(terrain_locomotion_mix.terrain_term, horizontal_scale=0.2),
 )
 
 DEFAULTS = {

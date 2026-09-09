@@ -145,6 +145,13 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         If None, creates and manages sim app automatically.
     """
 
+    log_base_dir = os.environ.get("HOLOSOMA_LOG_BASE_DIR", "").strip()
+    if log_base_dir:
+        tyro_config = dataclasses.replace(
+            tyro_config,
+            logger=dataclasses.replace(tyro_config.logger, base_dir=log_base_dir),
+        )
+
     if training_context is not None:
         # Use the context's pre-initialized sim app
         simulation_app = training_context.simulation_app

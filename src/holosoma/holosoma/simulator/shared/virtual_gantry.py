@@ -187,6 +187,11 @@ class VirtualGantry:
         env_id = 0
         x, y = self.sim.robot_root_states[env_id, :3].detach().cpu().numpy()[:2]
         self.point = np.array([x, y, self.height])
+        if self._clear_forces_impl is not None:
+            # External MuJoCo forces persist until overwritten. Clear them when
+            # teleporting/re-anchoring so the old gantry force cannot pull the
+            # robot back toward the previous anchor before the next gantry step.
+            self._clear_forces_impl()
         logger.debug(f"Virtual gantry position reset to '{self.point}'")
 
     def handle_command(self, command_data: GantryCommandData | GantryCommand) -> bool:
@@ -340,23 +345,22 @@ class VirtualGantry:
             self.sim.applied_forces[link_id, :3] = force
 
     def _clear_forces_mujoco(self) -> None:
-        """Clear forces in MuJoCo (WarpBackend only - ClassicBackend doesn't need it).
+        """Clear the gantry-applied external wrench in MuJoCo.
 
-        WarpBackend requires explicit clearing of GPU tensors when disabling the gantry,
-        while ClassicBackend's numpy array clearing happens naturally through the
-        simulation step (xfrc_applied is automatically zeroed each step by MuJoCo).
+        ``get_applied_forces_view()`` exposes a writable view of MuJoCo's
+        ``xfrc_applied`` buffer. Those external forces persist until we overwrite
+        them, so disabling the gantry must explicitly zero the attached body's
+        force/torque entry for both ClassicBackend (numpy) and WarpBackend (torch).
 
-        This method only clears forces for the specific body the gantry is attached to,
-        leaving other external forces unaffected.
+        This method only clears forces for the specific body the gantry is attached
+        to, leaving unrelated external forces untouched.
         """
         env_id = 0  # Virtual gantry only supports single environment
 
         if isinstance(self.sim.applied_forces, torch.Tensor):
-            # WarpBackend: Clear GPU tensor for this body only
-            # Zero out both forces [0:3] and torques [3:6] for completeness
             self.sim.applied_forces[env_id, self.body_link_id, :] = 0.0
-        # ClassicBackend (numpy array): Do nothing
-        # MuJoCo automatically zeros xfrc_applied each step, so no explicit clearing needed
+        else:
+            self.sim.applied_forces[self.body_link_id, :] = 0.0
 
     def _apply_force_isaacgym(self, link_id: int, force: npt.NDArray[np.float64]) -> None:
         """Apply force to rigid body in IsaacGym simulator.

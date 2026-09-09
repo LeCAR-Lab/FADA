@@ -1,50 +1,108 @@
 cff-version: 1.2.0
-title: Holosoma
+title: "FADA: Few-Shot Domain Adaptation via Dynamics Alignment for Humanoid Control"
 message: >-
-  If you use this software, please cite it using the
-  metadata from this file.
+  This repository contains the code release for the FADA paper. If you use
+  this software, please cite it using the metadata from this file. FADA is
+  built on top of Holosoma (see the `references` entry below); if you also
+  use the underlying Holosoma framework, please cite that work as well.
 type: software
+preferred-citation:
+  type: article
+  title: "FADA: Few-Shot Domain Adaptation via Dynamics Alignment for Humanoid Control"
+  year: 2026
+  month: 6
+  journal: arXiv
+  authors:
+    - given-names: Angchen
+      family-names: Xie
+    - given-names: Nikhil
+      family-names: Sobanbabu
+    - given-names: Ishayu
+      family-names: Shikhare
+    - given-names: Alan
+      family-names: Wang
+    - given-names: Max
+      family-names: Simchowitz
+    - given-names: Guanya
+      family-names: Shi
+  identifiers:
+    - type: doi
+      value: 10.48550/arXiv.2606.28476
+    - type: other
+      value: arXiv:2606.28476
+      description: arXiv preprint
 authors:
-  - name: Amazon FAR
-  - given-names: Pieter
-    family-names: Abbeel
-  - given-names: Juyue
-    family-names: Chen
-  - given-names: Rocky
-    family-names: Duan
-  - given-names: Alejandro
-    family-names: Escontrela
-  - given-names: Manan
-    family-names: Gandhi
-  - given-names: Samuel
-    family-names: Gundry
-  - given-names: Xiaoyu
-    family-names: Huang
-  - given-names: Angjoo
-    family-names: Kanazawa
-  - given-names: Tomasz
-    family-names: Lewicki
-  - given-names: Jiaman
-    family-names: Li
-  - given-names: Karen
-    family-names: Liu
-  - given-names: Clay
-    family-names: Rosenthal
-  - given-names: Younggyo
-    family-names: Seo
-  - given-names: Carlo
-    family-names: Sferrazza
+  - given-names: Angchen
+    family-names: Xie
+  - given-names: Nikhil
+    family-names: Sobanbabu
+  - given-names: Ishayu
+    family-names: Shikhare
+  - given-names: Alan
+    family-names: Wang
+  - given-names: Max
+    family-names: Simchowitz
   - given-names: Guanya
     family-names: Shi
-  - given-names: Linda
-    family-names: Shih
-  - given-names: Jonathan
-    family-names: Tseng
-  - given-names: Zhen
-    family-names: Wu
-  - given-names: Lujie
-    family-names: Yang
-  - given-names: Brent
-    family-names: Yi
-  - given-names: Yuanhang
-    family-names: Zhang
+identifiers:
+  - type: doi
+    value: 10.48550/arXiv.2606.28476
+  - type: other
+    value: arXiv:2606.28476
+    description: arXiv preprint
+# `repository-code` is supplied when the public tree is built -- the URL does not
+# exist until the repository does -- and is verified inside that tree before the
+# release commit is made, so it is part of the byte-verified published history
+# rather than an edit pushed after verification ran. In the development tree this
+# line carries a placeholder token instead of a URL; the build refuses to run
+# without it.
+repository-code: "https://github.com/LeCAR-Lab/FADA"
+# Verified against LICENSE, which is byte-identical to upstream Holosoma's.
+license: Apache-2.0
+references:
+  - title: Holosoma
+    type: software
+    authors:
+      - name: Amazon FAR
+      - given-names: Pieter
+        family-names: Abbeel
+      - given-names: Juyue
+        family-names: Chen
+      - given-names: Rocky
+        family-names: Duan
+      - given-names: Alejandro
+        family-names: Escontrela
+      - given-names: Manan
+        family-names: Gandhi
+      - given-names: Samuel
+        family-names: Gundry
+      - given-names: Xiaoyu
+        family-names: Huang
+      - given-names: Angjoo
+        family-names: Kanazawa
+      - given-names: Tomasz
+        family-names: Lewicki
+      - given-names: Jiaman
+        family-names: Li
+      - given-names: Karen
+        family-names: Liu
+      - given-names: Clay
+        family-names: Rosenthal
+      - given-names: Younggyo
+        family-names: Seo
+      - given-names: Carlo
+        family-names: Sferrazza
+      - given-names: Guanya
+        family-names: Shi
+      - given-names: Linda
+        family-names: Shih
+      - given-names: Jonathan
+        family-names: Tseng
+      - given-names: Zhen
+        family-names: Wu
+      - given-names: Lujie
+        family-names: Yang
+      - given-names: Brent
+        family-names: Yi
+      - given-names: Yuanhang
+        family-names: Zhang

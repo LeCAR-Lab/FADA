@@ -7,6 +7,10 @@ implementations for terrain rendering, contact detection, and physics simulation
 from __future__ import annotations
 
 import dataclasses
+import json
+import math
+from pathlib import Path
+from typing import Any
 
 import mujoco
 import mujoco.viewer
@@ -21,6 +25,7 @@ from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
 from holosoma.simulator.mujoco.backends import WARP_AVAILABLE, ClassicBackend, WarpBackend
 from holosoma.simulator.mujoco.command_registry import CommandRegistry
 from holosoma.simulator.mujoco.fields import prepare_fields, prepare_manager_fields
+from holosoma.simulator.mujoco.prediction_twin_viz import PredictionTwinViz
 from holosoma.simulator.mujoco.scene_manager import MujocoSceneManager
 from holosoma.simulator.mujoco.tensor_views import (
     create_base_linear_acceleration_view,
@@ -141,6 +146,7 @@ class MuJoCo(BaseSimulator):
 
         # Viewer
         self.viewer: mujoco.viewer.Handle | None = None
+        self.prediction_twin_viz: PredictionTwinViz | None = None
 
         # World ID for multi-environment visualization (which environment to view)
         self.current_world_id: int = 0
@@ -354,6 +360,14 @@ class MuJoCo(BaseSimulator):
         self._set_robot_joint_addressing()
         self._set_initial_joint_angles()
 
+        # Optional simulator-side visualization of transformer chunk/obs prediction twins.
+        self.prediction_twin_viz = PredictionTwinViz(self, self.simulator_config.prediction_twin_viz)
+
+        # Apply link mass scaling if configured
+        self._apply_link_mass_scale()
+        self._apply_link_payloads()
+        self._apply_joint_payloads()
+
         # Initialize virtual gantry after the robot using config
         gantry_cfg = self.simulator_config.virtual_gantry
         self.virtual_gantry = create_virtual_gantry(
@@ -385,6 +399,7 @@ class MuJoCo(BaseSimulator):
         collision configuration and scene element integration.
         """
         terrain_state = self.terrain_manager.get_state("locomotion_terrain")
+        xml_filter = self.simulator_config.robot_mjcf_filter
         if terrain_state.mesh_type not in ["none", "fake"]:
             # For now, use mesh type to decide whether to programmatically
             # setup scene, terrain, etc. Cannot use "none" since env code relies on none
@@ -395,11 +410,15 @@ class MuJoCo(BaseSimulator):
             self.scene_manager.add_terrain(terrain_state, self.training_config.num_envs)
             self.scene_manager.add_lighting()
             self.scene_manager.add_materials()
+            if not xml_filter.enable:
+                xml_filter = dataclasses.replace(xml_filter, enable=True)
+                logger.info(
+                    "Enabled MuJoCo robot MJCF filtering because terrain is managed by the scene manager. "
+                    "This avoids duplicate ground/lights from robot XML files."
+                )
 
         # Always add robot after terrain, in case it references ground/floor, etc for contacts
-        self.scene_manager.add_robot(
-            terrain_state, self.robot_config, xml_filter=self.simulator_config.robot_mjcf_filter
-        )
+        self.scene_manager.add_robot(terrain_state, self.robot_config, xml_filter=xml_filter)
 
     def _set_robot_properties(self) -> None:
         """Set robot properties including DOF names, body names, and index mappings.
@@ -412,17 +431,20 @@ class MuJoCo(BaseSimulator):
         assert self.root_model
         all_joint_names = [self.root_model.joint(i).name for i in range(self.root_model.njnt)]
 
-        # Filter out freejoints
-        # TODO: make more robust/not hardcoded names, also handle objects
+        # Filter out freejoints by type (robust regardless of naming convention)
+        # and also exclude unnamed/prefix-only joints
         prefix = self.scene_manager.robot_prefix
-        exclude_names = [
-            f"{prefix}freejoint",
-            f"{prefix}floating_base_joint",
+        exclude_names = {
             f"{prefix}",  # keep named joints only
             "",  # keep named joints only
-        ]
+        }
 
-        robot_joint_names = [n for n in all_joint_names if n not in exclude_names]
+        robot_joint_names = [
+            self.root_model.joint(i).name
+            for i in range(self.root_model.njnt)
+            if self.root_model.jnt_type[i] != mujoco.mjtJoint.mjJNT_FREE  # skip freejoints
+            and self.root_model.joint(i).name not in exclude_names  # skip excluded
+        ]
 
         # Build name maps first
         self._build_name_maps()
@@ -456,21 +478,19 @@ class MuJoCo(BaseSimulator):
         """
         logger.info("=== Setting up robot joint addressing ===")
 
-        # Find the named freejoint for robot root control (use prefixed name)
+        # Find the robot's freejoint by type (robust regardless of naming convention)
         assert self.root_model
-        has_freejoint = True
-        freejoint_name = self._get_prefixed_name("floating_base_joint")
-        self.robot_freejoint_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_JOINT, freejoint_name)
+        self.robot_freejoint_id = next(
+            (i for i in range(self.root_model.njnt) if self.root_model.jnt_type[i] == mujoco.mjtJoint.mjJNT_FREE),
+            -1,
+        )
 
         if self.robot_freejoint_id == -1:
-            logger.warning(f"Robot freejoint '{freejoint_name}' not found in model")
+            logger.warning("No freejoint found in model, using joint 0 as fallback")
             self.robot_freejoint_id = 0
-            has_freejoint = False
-
-        # Validate it's actually a freejoint
-        if has_freejoint and self.root_model.jnt_type[self.robot_freejoint_id] != mujoco.mjtJoint.mjJNT_FREE:
-            joint_type = self.root_model.jnt_type[self.robot_freejoint_id]
-            raise ValueError(f"Joint '{freejoint_name}' is not a freejoint, got type {joint_type}")
+        else:
+            fj_name = self.root_model.joint(self.robot_freejoint_id).name
+            logger.info(f"Found robot freejoint: '{fj_name}' (id={self.robot_freejoint_id})")
 
         # Get addressing info for freejoint
         self.robot_qpos_addr = self.root_model.jnt_qposadr[self.robot_freejoint_id]
@@ -555,6 +575,383 @@ class MuJoCo(BaseSimulator):
         # Forward kinematics to update body positions based on joint angles
         mujoco.mj_forward(self.root_model, self.root_data)
         logger.info("Applied forward kinematics with initial joint angles")
+
+    def _apply_link_mass_scale(self) -> None:
+        """Apply link mass scaling from configuration.
+        
+        Scales robot body masses by the configured factor (link_mass_scale).
+        This matches IsaacGym's behavior: only modifies bodies specified in
+        robot_config.randomize_link_body_names, using SCALE operation.
+        
+        After modifying masses, calls mj_setConst() to recompute inertia,
+        similar to IsaacGym's recomputeInertia=True.
+        """
+        mass_scale = self.simulator_config.link_mass_scale
+        
+        # Skip if scale is 1.0 (no modification needed)
+        if mass_scale == 1.0:
+            return
+        
+        assert self.root_model
+        logger.info(f"Applying link mass scale: {mass_scale}x")
+        
+        # Get the list of body names to modify (same as IsaacGym)
+        body_names = list(self.robot_config.randomize_link_body_names or [])
+        if not body_names:
+            logger.warning(
+                "link_mass_scale is set but robot_config.randomize_link_body_names is empty. "
+                "No bodies will be modified. This matches IsaacGym behavior."
+            )
+            return
+        
+        # Store original masses for logging
+        modified_count = 0
+        total_original_mass = 0.0
+        total_scaled_mass = 0.0
+        
+        # Apply scaling only to specified bodies (same as IsaacGym)
+        for body_name in body_names:
+            # Check if body exists in the model
+            if body_name not in self.body_names:
+                logger.debug(f"Body '{body_name}' not found in model, skipping")
+                continue
+            
+            prefixed_name = self._get_prefixed_name(body_name)
+            body_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_BODY, prefixed_name)
+            
+            if body_id != -1:
+                original_mass = self.root_model.body_mass[body_id]
+                # Use SCALE operation (same as IsaacGym: body_props[body_index].mass *= scale)
+                scaled_mass = original_mass * mass_scale
+                self.root_model.body_mass[body_id] = scaled_mass
+                
+                total_original_mass += original_mass
+                total_scaled_mass += scaled_mass
+                modified_count += 1
+                
+                logger.debug(
+                    f"Scaled '{body_name}' mass: {original_mass:.6f} -> {scaled_mass:.6f} kg "
+                    f"(scale: {mass_scale}x)"
+                )
+            else:
+                logger.warning(f"Could not find body ID for '{body_name}' (prefixed: '{prefixed_name}')")
+        
+        if modified_count == 0:
+            logger.warning("No bodies were modified. Check robot_config.randomize_link_body_names.")
+            return
+        
+        logger.info(
+            f"Link mass scaling complete: {modified_count} bodies modified, "
+            f"total mass: {total_original_mass:.6f} -> {total_scaled_mass:.6f} kg "
+            f"(scale: {mass_scale}x)"
+        )
+        
+        # Recompute inertia and other derived quantities (same as IsaacGym's recomputeInertia=True)
+        # mj_setConst() updates all derived quantities including inertia tensors
+        self._finalize_mass_property_updates()
+
+    def _normalize_link_payload_entries(self, raw_entries: Any, source_desc: str) -> list[dict[str, Any]]:
+        """Normalize link/body payload entries from inline CLI values or JSON config."""
+        if isinstance(raw_entries, dict):
+            if "link_payloads" in raw_entries:
+                raw_entries = raw_entries["link_payloads"]
+            elif any(key in raw_entries for key in ("link", "link_name", "body", "body_name", "added_mass")):
+                raw_entries = [raw_entries]
+            else:
+                raw_entries = [
+                    {"link": body_name, "added_mass": added_mass}
+                    for body_name, added_mass in raw_entries.items()
+                ]
+
+        if not isinstance(raw_entries, list):
+            raise ValueError(
+                f"Link payload config must be a list or mapping, got {type(raw_entries).__name__}: {source_desc}"
+            )
+
+        normalized: list[dict[str, Any]] = []
+        for idx, entry in enumerate(raw_entries):
+            if not isinstance(entry, dict):
+                raise ValueError(f"Link payload entry #{idx} must be a mapping in {source_desc}")
+            link = entry.get("link", entry.get("link_name", entry.get("body", entry.get("body_name"))))
+            if link is None or not str(link).strip():
+                raise ValueError(f"Link payload entry #{idx} missing non-empty 'link' in {source_desc}")
+            if "added_mass" not in entry:
+                raise ValueError(f"Link payload entry #{idx} missing 'added_mass' in {source_desc}")
+            added_mass = float(entry["added_mass"])
+            if not math.isfinite(added_mass):
+                raise ValueError(f"Link payload entry #{idx} has non-finite added_mass in {source_desc}")
+            normalized.append(
+                {
+                    "link": str(link).strip(),
+                    "added_mass": added_mass,
+                }
+            )
+        return normalized
+
+    def _load_link_payload_entries(self) -> list[dict[str, Any]]:
+        """Load fixed link/body payload masses from inline config and/or JSON config."""
+        normalized: list[dict[str, Any]] = []
+
+        inline_payloads = self.simulator_config.link_payloads
+        if inline_payloads:
+            normalized.extend(
+                self._normalize_link_payload_entries(
+                    inline_payloads,
+                    "simulator.config.link_payloads",
+                )
+            )
+
+        config_path = self.simulator_config.link_payload_config_path
+        if not config_path:
+            return normalized
+
+        resolved = Path(str(config_path)).expanduser().resolve()
+        try:
+            payload = json.loads(resolved.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"Link payload config not found: {resolved}") from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Link payload config is not valid JSON: {resolved}") from exc
+
+        normalized.extend(self._normalize_link_payload_entries(payload, str(resolved)))
+        return normalized
+
+    def _resolve_link_payload_body_id(self, body_name: str) -> int:
+        """Resolve a payload body/link name against clean and prefixed MuJoCo names."""
+        assert self.root_model
+
+        for candidate in (body_name, self._get_prefixed_name(body_name)):
+            body_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_BODY, candidate)
+            if body_id != -1:
+                return int(body_id)
+
+        available_names = [
+            self._get_clean_name(self.root_model.body(i).name or f"body_{i}")
+            for i in range(1, min(self.root_model.nbody, 9))
+        ]
+        available = ", ".join(available_names)
+        if self.root_model.nbody > 9:
+            available += ", ..."
+        raise ValueError(
+            f"Link payload target '{body_name}' was not found in the MuJoCo model. "
+            f"Available body names include: {available}"
+        )
+
+    def _apply_link_payloads(self) -> None:
+        """Apply fixed per-link payload masses by adding mass directly to the target body."""
+        payload_entries = self._load_link_payload_entries()
+        if not payload_entries:
+            return
+
+        assert self.root_model
+        assert self.root_data
+
+        logger.info(f"Applying fixed link payloads: {len(payload_entries)} entries")
+
+        total_added_mass = 0.0
+        modified_count = 0
+        per_body_added_mass: dict[str, float] = {}
+
+        for entry in payload_entries:
+            link_name = str(entry["link"])
+            added_mass = float(entry["added_mass"])
+            if added_mass == 0.0:
+                logger.debug(f"Skipping zero-mass payload for body '{link_name}'")
+                continue
+
+            body_id = self._resolve_link_payload_body_id(link_name)
+            raw_body_name = self.root_model.body(body_id).name or f"body_{body_id}"
+            body_name = self._get_clean_name(raw_body_name)
+            original_mass = float(self.root_model.body_mass[body_id])
+            new_mass = original_mass + added_mass
+            if new_mass <= 0.0:
+                raise ValueError(
+                    f"Applying payload {added_mass} kg to body '{body_name}' would make it "
+                    f"non-positive mass ({new_mass} kg)"
+                )
+
+            self.root_model.body_mass[body_id] = new_mass
+            per_body_added_mass[body_name] = per_body_added_mass.get(body_name, 0.0) + added_mass
+            total_added_mass += added_mass
+            modified_count += 1
+
+            logger.info(
+                f"Applied payload to body '{body_name}': "
+                f"{original_mass:.6f} -> {new_mass:.6f} kg (delta={added_mass:+.6f} kg)"
+            )
+
+        if modified_count == 0:
+            logger.info("Link payload config resolved to zero total added mass")
+            return
+
+        body_summary = ", ".join(
+            f"{body}={added:+.3f}kg" for body, added in sorted(per_body_added_mass.items())
+        )
+        logger.info(
+            f"Link payload application complete: total added mass {total_added_mass:+.6f} kg; "
+            f"per-body deltas: {body_summary}"
+        )
+        self._finalize_mass_property_updates()
+
+    def _normalize_joint_payload_entries(self, raw_entries: Any, source_desc: str) -> list[dict[str, Any]]:
+        """Normalize payload entries from inline CLI values or JSON config."""
+        if isinstance(raw_entries, dict):
+            if "joint_payloads" in raw_entries:
+                raw_entries = raw_entries["joint_payloads"]
+            elif "joint" in raw_entries or "added_mass" in raw_entries:
+                raw_entries = [raw_entries]
+            else:
+                raw_entries = [
+                    {"joint": joint_name, "added_mass": added_mass}
+                    for joint_name, added_mass in raw_entries.items()
+                ]
+
+        if not isinstance(raw_entries, list):
+            raise ValueError(
+                f"Joint payload config must be a list or mapping, got {type(raw_entries).__name__}: {source_desc}"
+            )
+
+        normalized: list[dict[str, Any]] = []
+        for idx, entry in enumerate(raw_entries):
+            if not isinstance(entry, dict):
+                raise ValueError(f"Joint payload entry #{idx} must be a mapping in {source_desc}")
+            joint = entry.get("joint", entry.get("joint_name"))
+            if joint is None or not str(joint).strip():
+                raise ValueError(f"Joint payload entry #{idx} missing non-empty 'joint' in {source_desc}")
+            if "added_mass" not in entry:
+                raise ValueError(f"Joint payload entry #{idx} missing 'added_mass' in {source_desc}")
+            added_mass = float(entry["added_mass"])
+            if not math.isfinite(added_mass):
+                raise ValueError(f"Joint payload entry #{idx} has non-finite added_mass in {source_desc}")
+            normalized.append(
+                {
+                    "joint": str(joint).strip(),
+                    "added_mass": added_mass,
+                }
+            )
+        return normalized
+
+    def _load_joint_payload_entries(self) -> list[dict[str, Any]]:
+        """Load fixed joint payload masses from inline config and/or JSON config."""
+        normalized: list[dict[str, Any]] = []
+
+        inline_payloads = self.simulator_config.joint_payloads
+        if inline_payloads:
+            normalized.extend(
+                self._normalize_joint_payload_entries(
+                    inline_payloads,
+                    "simulator.config.joint_payloads",
+                )
+            )
+
+        config_path = self.simulator_config.joint_payload_config_path
+        if not config_path:
+            return normalized
+
+        resolved = Path(str(config_path)).expanduser().resolve()
+        try:
+            payload = json.loads(resolved.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"Joint payload config not found: {resolved}") from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Joint payload config is not valid JSON: {resolved}") from exc
+
+        normalized.extend(self._normalize_joint_payload_entries(payload, str(resolved)))
+        return normalized
+
+    def _resolve_joint_payload_joint_id(self, joint_name: str) -> int:
+        """Resolve a payload joint name against clean and prefixed MuJoCo names."""
+        assert self.root_model
+
+        for candidate in (joint_name, self._get_prefixed_name(joint_name)):
+            joint_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_JOINT, candidate)
+            if joint_id != -1:
+                return int(joint_id)
+
+        available = ", ".join(self.dof_names[:8])
+        if len(self.dof_names) > 8:
+            available += ", ..."
+        raise ValueError(
+            f"Joint payload target '{joint_name}' was not found in the MuJoCo model. "
+            f"Available actuated joints include: {available}"
+        )
+
+    def _apply_joint_payloads(self) -> None:
+        """Apply legacy per-joint payload masses by adding mass to the owning body."""
+        payload_entries = self._load_joint_payload_entries()
+        if not payload_entries:
+            return
+
+        assert self.root_model
+        assert self.root_data
+
+        logger.info(f"Applying legacy joint payloads: {len(payload_entries)} entries")
+
+        total_added_mass = 0.0
+        modified_count = 0
+        per_body_added_mass: dict[str, float] = {}
+
+        for entry in payload_entries:
+            joint_name = str(entry["joint"])
+            added_mass = float(entry["added_mass"])
+            if added_mass == 0.0:
+                logger.debug(f"Skipping zero-mass payload for joint '{joint_name}'")
+                continue
+
+            joint_id = self._resolve_joint_payload_joint_id(joint_name)
+            joint_type = int(self.root_model.jnt_type[joint_id])
+            if joint_type == int(mujoco.mjtJoint.mjJNT_FREE):
+                raise ValueError(f"Joint payload target '{joint_name}' resolves to a free joint, which is not supported")
+
+            body_id = int(self.root_model.jnt_bodyid[joint_id])
+            raw_body_name = self.root_model.body(body_id).name or f"body_{body_id}"
+            body_name = self._get_clean_name(raw_body_name)
+            original_mass = float(self.root_model.body_mass[body_id])
+            new_mass = original_mass + added_mass
+            if new_mass <= 0.0:
+                raise ValueError(
+                    f"Applying payload {added_mass} kg to joint '{joint_name}' would make body '{body_name}' "
+                    f"non-positive mass ({new_mass} kg)"
+                )
+
+            self.root_model.body_mass[body_id] = new_mass
+            per_body_added_mass[body_name] = per_body_added_mass.get(body_name, 0.0) + added_mass
+            total_added_mass += added_mass
+            modified_count += 1
+
+            logger.info(
+                f"Applied payload to joint '{joint_name}' -> body '{body_name}': "
+                f"{original_mass:.6f} -> {new_mass:.6f} kg (delta={added_mass:+.6f} kg)"
+            )
+
+        if modified_count == 0:
+            logger.info("Joint payload config resolved to zero total added mass")
+            return
+
+        body_summary = ", ".join(
+            f"{body}={added:+.3f}kg" for body, added in sorted(per_body_added_mass.items())
+        )
+        logger.info(
+            f"Joint payload application complete: total added mass {total_added_mass:+.6f} kg; "
+            f"per-body deltas: {body_summary}"
+        )
+        self._finalize_mass_property_updates()
+
+    def _finalize_mass_property_updates(self) -> None:
+        """Recompute derived mass/inertia quantities and sync backends if needed."""
+        assert self.root_model
+        assert self.root_data
+
+        mujoco.mj_setConst(self.root_model, self.root_data)
+        logger.debug("Recomputed inertia using mj_setConst() (equivalent to IsaacGym's recomputeInertia=True)")
+
+        # If using Warp backend, sync changes to GPU
+        if hasattr(self, 'backend') and self.simulator_config.mujoco_backend == MujocoBackend.WARP:
+            # Warp backend needs to sync the model changes to GPU
+            # The backend should handle this on next step, but we can trigger forward pass
+            if self.root_data:
+                mujoco.mj_forward(self.root_model, self.root_data)
+                logger.debug("Synced mass changes to Warp backend")
 
     def get_supported_scene_formats(self) -> list[str]:
         """Get supported scene formats.
@@ -887,6 +1284,71 @@ class MuJoCo(BaseSimulator):
     def draw_debug_viz(self):
         if self.virtual_gantry:
             self.virtual_gantry.draw_debug()
+        if self.prediction_twin_viz is not None:
+            self.prediction_twin_viz.draw()
+
+    def _apply_deploy_ee_forces(self) -> None:
+        """Write configured constant external forces into MuJoCo's xfrc_applied for wrists.
+
+        Lazily resolves wrist body indices on first call (after mj model is built). Writes
+        only the force slice (``[..., 0:3]``); the torque slice (``[..., 3:6]``) is left
+        untouched. ``applied_forces`` persists in MuJoCo's ``xfrc_applied`` until overwritten,
+        so this overwrites every substep with the configured constants.
+        """
+        cfg = self.simulator_config
+        left = getattr(cfg, "deploy_ee_force_left", None)
+        right = getattr(cfg, "deploy_ee_force_right", None)
+        if left is None and right is None:
+            return
+
+        # Lazily resolve and cache end-effector body indices. G1 uses wrist yaw
+        # bodies; T1-23DoF has fixed hand bodies instead.
+        if not hasattr(self, "_deploy_force_left_idx"):
+            def _resolve_body(side: str, candidates: tuple[str, ...]) -> tuple[int | None, str | None]:
+                failures: list[str] = []
+                for body_name in candidates:
+                    try:
+                        return self.find_rigid_body_indice(body_name), body_name
+                    except Exception as exc:
+                        failures.append(f"{body_name}: {exc}")
+                logger.warning(
+                    f"[deploy-force] no {side} end-effector body found; tried {list(candidates)}. "
+                    f"Failures: {'; '.join(failures)}"
+                )
+                return None, None
+
+            self._deploy_force_left_idx, self._deploy_force_left_name = _resolve_body(
+                "left",
+                ("left_wrist_yaw_link", "left_hand_link"),
+            )
+            self._deploy_force_right_idx, self._deploy_force_right_name = _resolve_body(
+                "right",
+                ("right_wrist_yaw_link", "right_hand_link"),
+            )
+            if self._deploy_force_left_idx is not None:
+                logger.info(f"[deploy-force] left force target: {self._deploy_force_left_name}")
+            if self._deploy_force_right_idx is not None:
+                logger.info(f"[deploy-force] right force target: {self._deploy_force_right_name}")
+
+        is_torch = isinstance(self.applied_forces, torch.Tensor)
+
+        def _write(idx: int | None, force_dict: dict[str, float] | None) -> None:
+            if force_dict is None or idx is None:
+                return
+            fx = float(force_dict.get("x", 0.0))
+            fy = float(force_dict.get("y", 0.0))
+            fz = float(force_dict.get("z", 0.0))
+            if is_torch:
+                # WarpBackend: (num_envs, num_bodies, 6); deploy is single-env (env_id=0).
+                self.applied_forces[0, idx, 0:3] = torch.tensor(
+                    [fx, fy, fz], device=self.applied_forces.device, dtype=self.applied_forces.dtype
+                )
+            else:
+                # ClassicBackend: (num_bodies, 6).
+                self.applied_forces[idx, 0:3] = np.asarray([fx, fy, fz], dtype=np.float64)
+
+        _write(self._deploy_force_left_idx, left)
+        _write(self._deploy_force_right_idx, right)
 
     def simulate_at_each_physics_step(self) -> None:
         """Advance simulation by one step."""
@@ -897,6 +1359,12 @@ class MuJoCo(BaseSimulator):
 
         # Step bridge for updated torques before step using base class helper
         self._step_bridge()
+
+        # Deploy-time external EE force (sim2sim, for force-adaptive robustness testing).
+        # Writes constant world-frame force into MuJoCo's ``xfrc_applied`` slot for the
+        # configured wrist links each substep. No-op when both deploy_ee_force_left/right
+        # are None.
+        self._apply_deploy_ee_forces()
 
         # Delegate simulation step to backend
         self.backend.step()
@@ -1303,6 +1771,51 @@ class MuJoCo(BaseSimulator):
 
         raise RuntimeError(f"Body '{body_name}' not found in body_names: {self.body_names}")
 
+    def _get_robot_view_target(self, render_data: mujoco.MjData | None = None) -> np.ndarray | None:
+        """Return a stable viewer target near the robot root.
+
+        Prefer the robot free-joint translation from qpos so the initial camera
+        works even before body transforms are consumed elsewhere.
+        """
+        data = render_data if render_data is not None else self.root_data
+        if data is None:
+            return None
+
+        if self.robot_qpos_addr is not None and data.qpos.shape[0] >= self.robot_qpos_addr + 3:
+            return np.array(data.qpos[self.robot_qpos_addr : self.robot_qpos_addr + 3], dtype=np.float64, copy=True)
+
+        if self.root_model is not None and self.root_model.nbody > 1:
+            return np.array(data.xpos[1], dtype=np.float64, copy=True)
+
+        return None
+
+    def _update_viewer_camera(
+        self,
+        *,
+        reset_pose: bool = False,
+        render_data: mujoco.MjData | None = None,
+    ) -> None:
+        """Recenter the viewer camera on the current robot pose.
+
+        This keeps the initial direct-sim view usable even when terrain-aware
+        spawn places the robot at a non-zero terrain origin.
+        """
+        if self.viewer is None:
+            return
+
+        if render_data is None:
+            render_data = self.backend.get_render_data(world_id=self.current_world_id)
+
+        target = self._get_robot_view_target(render_data)
+        if target is None:
+            return
+
+        self.viewer.cam.lookat[:] = target
+        if reset_pose:
+            self.viewer.cam.distance = 3.5
+            self.viewer.cam.azimuth = 135.0
+            self.viewer.cam.elevation = -20.0
+
     def setup_viewer(self) -> None:
         """Set up MuJoCo viewer using official mujoco.viewer API with keyboard callback."""
         logger.info("=== Setting up MuJoCo viewer ===")
@@ -1313,6 +1826,8 @@ class MuJoCo(BaseSimulator):
             return
 
         self.viewer = mujoco.viewer.launch_passive(self.root_model, self.root_data, key_callback=self._key_callback)
+        self._update_viewer_camera(reset_pose=True)
+        self.viewer.sync()
         logger.info("=== Viewer setup completed with keyboard callback ===")
 
     def _add_text_overlay(
@@ -1364,8 +1879,7 @@ class MuJoCo(BaseSimulator):
         self.root_data = self.backend.get_render_data(world_id=self.current_world_id)
 
         if self.simulator_config.viewer.enable_tracking:
-            robot_body_id = 1
-            self.viewer.cam.lookat[:] = self.root_data.xpos[robot_body_id]
+            self._update_viewer_camera(render_data=self.root_data)
 
         self.viewer.sync()
         if self.debug_viz_enabled:
@@ -1531,6 +2045,11 @@ class MuJoCo(BaseSimulator):
     def __del__(self) -> None:
         """Cleanup viewer on simulator destruction."""
         logger.info("=== MuJoCo Simulator Cleanup Started ===")
+        if getattr(self, "prediction_twin_viz", None) is not None:
+            try:
+                self.prediction_twin_viz.close()
+            except Exception as e:
+                logger.warning(f"Error during prediction_twin_viz cleanup: {e}")
         if hasattr(self, "viewer") and self.viewer is not None:
             try:
                 logger.info("Closing MuJoCo viewer")

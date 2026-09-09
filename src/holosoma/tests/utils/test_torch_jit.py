@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 import torch
 
+from holosoma.utils import torch_jit as torch_jit_module
 from holosoma.utils.torch_jit import _is_tensor_proxy, proxy_compatible, torch_jit_script
 
 
@@ -74,23 +75,43 @@ class TestBasicJitCompilation:
 
         assert torch.allclose(result, expected), "JIT function should produce correct results"
 
-    def test_jit_caching_works(self):
-        """Test that JIT functions are cached and reused."""
+    def test_jit_caching_returns_the_cached_object_instead_of_recompiling(self, monkeypatch):
+        """A cache hit does not call `torch.jit.script` a second time and returns the
+        *same* wrapper object. Asserted against a cache this test owns.
+        """
+        cache: dict = {}
+        monkeypatch.setattr(torch_jit_module, "_COMPILED_FUNCTION_CACHE", cache)
 
-        @torch_jit_script
+        compiled: list = []
+        real_script = torch_jit_module.torch.jit.script
+
+        def counting_script(fn, *args, **kwargs):
+            compiled.append(fn)
+            return real_script(fn, *args, **kwargs)
+
+        monkeypatch.setattr(torch_jit_module.torch.jit, "script", counting_script)
+
         def cached_function(x: torch.Tensor) -> torch.Tensor:
             return x + 1
 
-        # Call the function multiple times
+        key = f"{cached_function.__module__}.{cached_function.__qualname__}"
+
+        first = torch_jit_script(cached_function)
+        assert len(compiled) == 1, "the first decoration must actually compile"
+        assert cache[key] is first, "the compiled wrapper must be stored under its key"
+
+        second = torch_jit_script(cached_function)
+        assert second is first, (
+            "the second decoration returned a different object -- the cache was not returned"
+        )
+        assert len(compiled) == 1, (
+            f"torch.jit.script ran {len(compiled)} times: the cache lookup was skipped and the "
+            "function was recompiled"
+        )
+        assert list(cache) == [key], "a cache hit must not add a second entry"
+
         input_tensor = torch.tensor([1.0, 2.0])
-        result1 = cached_function(input_tensor)
-        result2 = cached_function(input_tensor)
-
-        # Results should be identical
-        assert torch.equal(result1, result2), "Cached function should produce identical results"
-
-        # The wrapped function should be the same object (cached)
-        assert cached_function.__wrapped__ is cached_function.__wrapped__, "Function should be cached"
+        assert torch.equal(first(input_tensor), second(input_tensor))
 
 
 class TestProxyObjectIntegration:

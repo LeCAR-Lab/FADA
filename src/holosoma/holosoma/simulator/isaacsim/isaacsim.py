@@ -11,22 +11,7 @@ import pathlib
 import trimesh
 
 from holosoma.config_types.full_sim import FullSimConfig
-import isaaclab.sim as sim_utils
-from isaaclab.assets import RigidObject, RigidObjectCfg
-import isaaclab.terrains as terrain_gen
-import omni.log
 import torch
-from isaaclab.actuators import IdealPDActuatorCfg
-from isaaclab.assets import Articulation, ArticulationCfg
-from isaaclab.envs import ViewerCfg, mdp
-from isaaclab.managers import EventManager, SceneEntityCfg
-from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.sensors import ContactSensor, ContactSensorCfg, RayCaster, RayCasterCfg, patterns
-from isaaclab.sim import PhysxCfg, SimulationCfg, SimulationContext
-from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
-from isaaclab.terrains.utils import create_prim_from_mesh
-from isaaclab.utils.timer import Timer
 from loguru import logger
 from omegaconf import DictConfig
 
@@ -35,33 +20,74 @@ from holosoma.utils.path import resolve_data_file_path
 from holosoma.config_types.simulator import SimulatorInitConfig, SceneConfig
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
-from holosoma.simulator.isaacsim.event_cfg import EventCfg
-from holosoma.simulator.isaacsim.events import randomize_body_com, randomize_rigid_body_inertia
-from holosoma.simulator.isaacsim.isaaclab_viewpoint_camera_controller import ViewportCameraController
-from holosoma.simulator.isaacsim.isaacsim_articulation_cfg import ARTICULATION_CFG
-from holosoma.simulator.isaacsim.usd_file_loader import USDFileLoader
-from holosoma.simulator.isaacsim.registry_utils import register_objects
-from holosoma.simulator.isaacsim.proxy_utils import AllRootStatesProxy, RootStatesProxy
-from holosoma.simulator.isaacsim.state_adapter import IsaacSimStateAdapter
-from holosoma.simulator.isaacsim.prim_utils import (
-    log_robot_properties,
-    print_prim_tree,
-    UsdSceneLoaderCfg,
-    create_usd_scene_loader,
-)
-from holosoma.simulator.isaacsim.video_recorder import IsaacSimVideoRecorder
-from holosoma.simulator.shared.virtual_gantry import (
-    VirtualGantry,
-    create_virtual_gantry,
-    GantryCommand,
-    GantryCommandData,
-)
 
 from holosoma.simulator.types import ActorNames, ActorIndices, EnvIds, ActorStates, ActorPoses
 
 
+def _init_isaacsim_runtime_imports() -> None:
+    """Lazily import Omniverse/IsaacLab stack after SimulationApp is launched."""
+    if "SimulationContext" in globals():
+        return
+
+    global sim_utils, terrain_gen, omni
+    global IdealPDActuatorCfg, RigidObject, RigidObjectCfg, Articulation, ArticulationCfg
+    global ViewerCfg, mdp, EventManager, SceneEntityCfg, EventTerm, InteractiveScene, InteractiveSceneCfg
+    global ContactSensor, ContactSensorCfg, RayCaster, RayCasterCfg, patterns
+    global PhysxCfg, SimulationCfg, SimulationContext, TerrainGeneratorCfg, TerrainImporterCfg
+    global create_prim_from_mesh, Timer
+    global EventCfg, randomize_body_com, randomize_rigid_body_inertia
+    global ViewportCameraController, ARTICULATION_CFG, USDFileLoader, register_objects
+    global AllRootStatesProxy, RootStatesProxy, IsaacSimStateAdapter
+    global log_robot_properties, print_prim_tree, UsdSceneLoaderCfg, create_usd_scene_loader
+    global IsaacSimVideoRecorder, VirtualGantry, create_virtual_gantry, GantryCommand, GantryCommandData
+
+    import isaaclab.sim as sim_utils  # noqa: PLC0415
+    import isaaclab.terrains as terrain_gen  # noqa: PLC0415
+    import omni  # noqa: PLC0415
+
+    from isaaclab.actuators import IdealPDActuatorCfg  # noqa: PLC0415
+    from isaaclab.assets import RigidObject, RigidObjectCfg, Articulation, ArticulationCfg  # noqa: PLC0415
+    from isaaclab.envs import ViewerCfg, mdp  # noqa: PLC0415
+    from isaaclab.managers import EventManager, SceneEntityCfg  # noqa: PLC0415
+    from isaaclab.managers import EventTermCfg as EventTerm  # noqa: PLC0415
+    from isaaclab.scene import InteractiveScene, InteractiveSceneCfg  # noqa: PLC0415
+    from isaaclab.sensors import ContactSensor, ContactSensorCfg, RayCaster, RayCasterCfg, patterns  # noqa: PLC0415
+    from isaaclab.sim import PhysxCfg, SimulationCfg, SimulationContext  # noqa: PLC0415
+    from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg  # noqa: PLC0415
+    from isaaclab.terrains.utils import create_prim_from_mesh  # noqa: PLC0415
+    from isaaclab.utils.timer import Timer  # noqa: PLC0415
+
+    from holosoma.simulator.isaacsim.event_cfg import EventCfg  # noqa: PLC0415
+    from holosoma.simulator.isaacsim.events import (  # noqa: PLC0415
+        randomize_body_com,
+        randomize_rigid_body_inertia,
+    )
+    from holosoma.simulator.isaacsim.isaaclab_viewpoint_camera_controller import (  # noqa: PLC0415
+        ViewportCameraController,
+    )
+    from holosoma.simulator.isaacsim.isaacsim_articulation_cfg import ARTICULATION_CFG  # noqa: PLC0415
+    from holosoma.simulator.isaacsim.usd_file_loader import USDFileLoader  # noqa: PLC0415
+    from holosoma.simulator.isaacsim.registry_utils import register_objects  # noqa: PLC0415
+    from holosoma.simulator.isaacsim.proxy_utils import AllRootStatesProxy, RootStatesProxy  # noqa: PLC0415
+    from holosoma.simulator.isaacsim.state_adapter import IsaacSimStateAdapter  # noqa: PLC0415
+    from holosoma.simulator.isaacsim.prim_utils import (  # noqa: PLC0415
+        log_robot_properties,
+        print_prim_tree,
+        UsdSceneLoaderCfg,
+        create_usd_scene_loader,
+    )
+    from holosoma.simulator.isaacsim.video_recorder import IsaacSimVideoRecorder  # noqa: PLC0415
+    from holosoma.simulator.shared.virtual_gantry import (  # noqa: PLC0415
+        VirtualGantry,
+        create_virtual_gantry,
+        GantryCommand,
+        GantryCommandData,
+    )
+
+
 class IsaacSim(BaseSimulator):
     def __init__(self, tyro_config: FullSimConfig, terrain_manager: TerrainManager, device: str):
+        _init_isaacsim_runtime_imports()
         super().__init__(tyro_config, terrain_manager, device)
 
         # Add device attribute for base simulator compatibility
@@ -500,11 +526,11 @@ class IsaacSim(BaseSimulator):
         scene_config = self.simulator_config.scene
 
         # Load scene files (USD/URDF scene files as collections) - NEW APPROACH
-        if scene_config.scene_files is not None:
+        if scene_config.scene_files:
             self._load_scene_files(scene_config)
 
         # Load individual rigid objects
-        if scene_config.rigid_objects is not None:
+        if scene_config.rigid_objects:
             self._load_rigid_objects(scene_config)
 
     def _load_scene_files(self, scene_config: SceneConfig) -> None:
@@ -804,6 +830,71 @@ class IsaacSim(BaseSimulator):
 
     def apply_torques_at_dof(self, torques):
         self._robot.set_joint_effort_target(torques, joint_ids=self.dof_ids)
+
+    @property
+    def jacobian(self) -> torch.Tensor:
+        """Per-link Jacobian in the same logical layout as ``IsaacGymSimulator.jacobian``.
+
+        Returns a tensor of shape ``(num_envs, num_bodies, 6, 6 + num_dof)`` for floating-base
+        actors (and ``(num_envs, num_bodies, 6, num_dof)`` for fixed-base). Body axis is
+        permuted from physics order to logical order via ``self.body_ids``; DOF axis keeps
+        the leading 6 floating-base columns intact and permutes the actuated DOFs via
+        ``self.dof_ids``. Used by per-env external-force / end-effector force calculations
+        that need each body's spatial Jacobian.
+        """
+        # PhysX-ordered: (N, n_bodies_phys, 6, 6 + n_dofs_phys) for floating-base, or
+        # (N, n_bodies_phys, 6, n_dofs_phys) for fixed-base.
+        jac_phys = self._robot.root_physx_view.get_jacobians()
+        # Permute body axis to logical.
+        jac = jac_phys[:, self.body_ids, :, :]
+        # Permute DOF axis to logical, keeping floating-base 6 cols up front when present.
+        if jac.shape[-1] == self.num_dof + 6:
+            dof_perm = list(range(6)) + [6 + i for i in self.dof_ids]
+        elif jac.shape[-1] == self.num_dof:
+            dof_perm = list(self.dof_ids)
+        else:
+            raise RuntimeError(
+                f"Unexpected jacobian DOF axis size {jac.shape[-1]} (num_dof={self.num_dof})"
+            )
+        return jac[..., dof_perm]
+
+    def apply_rigid_body_force_at_pos_tensor(
+        self, force_tensor: torch.Tensor, pos_tensor: torch.Tensor
+    ) -> None:
+        """World-frame force at world position, parallel to ``IsaacGymSimulator``'s API.
+
+        ``force_tensor`` and ``pos_tensor`` are ``(num_envs, num_bodies_logical, 3)``.
+        IsaacLab 2.1's ``set_external_force_and_torque`` applies forces in the body frame
+        (``is_global=False`` is hardcoded), so we (1) map logical→physics body order, (2)
+        compute the equivalent torque about the body COM from the offset
+        ``(pos_world - body_pos_world) × force_world``, and (3) rotate both into body frame.
+        """
+        from isaaclab.utils.math import quat_apply_inverse  # noqa: PLC0415
+
+        N = force_tensor.shape[0]
+        body_pos_w = self._robot.data.body_pos_w  # (N, n_phys, 3)
+        body_quat_w = self._robot.data.body_quat_w  # (N, n_phys, 4) wxyz
+        n_phys = body_pos_w.shape[1]
+
+        device = force_tensor.device
+        dtype = force_tensor.dtype
+        force_phys = torch.zeros(N, n_phys, 3, device=device, dtype=dtype)
+        pos_phys = torch.zeros_like(force_phys)
+        # logical→physics scatter: physics index for logical i is body_ids[i].
+        force_phys[:, self.body_ids, :] = force_tensor
+        pos_phys[:, self.body_ids, :] = pos_tensor
+
+        # Torque about body COM only where a force is set; pos=0 with no force ⇒ zero offset.
+        has_force = force_phys.abs().sum(dim=-1, keepdim=True) > 1e-9  # (N, n_phys, 1)
+        offset = torch.where(has_force, pos_phys - body_pos_w, torch.zeros_like(pos_phys))
+        torque_world = torch.cross(offset, force_phys, dim=-1)
+
+        # Rotate world→body using body_quat_w (wxyz, the IsaacLab convention).
+        flat_quat = body_quat_w.reshape(-1, 4)
+        force_body = quat_apply_inverse(flat_quat, force_phys.reshape(-1, 3)).reshape(N, n_phys, 3)
+        torque_body = quat_apply_inverse(flat_quat, torque_world.reshape(-1, 3)).reshape(N, n_phys, 3)
+
+        self._robot.set_external_force_and_torque(forces=force_body, torques=torque_body)
 
     def draw_debug_viz(self):
         if self.virtual_gantry:

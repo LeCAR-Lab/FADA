@@ -131,6 +131,8 @@ WORKFLOWS = [
 ]
 
 ISAACSIM_ONLY_WORKFLOWS = [
+    "g1-29dof-deploy",
+    "g1-29dof-oracle",
     "g1-29dof-wbt",
     "g1-29dof-wbt-fast-sac",
     "g1-29dof-wbt-w-object",

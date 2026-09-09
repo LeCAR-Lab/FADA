@@ -22,6 +22,8 @@ class LocomotionCommand(CommandTermBase):
         self.stand_prob: float = float(params.get("stand_prob", 0.0))
         self.command_dim: int = params.get("command_dim", 3)
         self.commands: torch.Tensor | None = None
+        # When True, evaluation runs will also resample commands instead of zeroing them.
+        self.allow_eval_randomization: bool = bool(params.get("allow_eval_randomization", False))
 
     # ------------------------------------------------------------------ #
     # Lifecycle hooks
@@ -42,11 +44,17 @@ class LocomotionCommand(CommandTermBase):
         if idx.numel() == 0:
             return
 
+        if self.env.is_evaluating and not self.allow_eval_randomization:
+            commands[idx] = 0.0
+            return
+
         self._resample(idx)
 
     def step(self) -> None:
         commands = self.commands
-        if commands is None or self.env.is_evaluating:
+        if commands is None:
+            return
+        if self.env.is_evaluating and not self.allow_eval_randomization:
             return
 
         command_cfg = getattr(self.manager, "command_cfg", None) if hasattr(self, "manager") else None

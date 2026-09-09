@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 from loguru import logger
 
 from holosoma.envs.base_task.base_task import BaseTask
+from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.torch_utils import torch_rand_float
 
@@ -53,6 +57,116 @@ class LeggedRobotLocomotionManager(BaseTask):
         self._init_domain_rand_buffers()
 
         self.lidar_height_offset = getattr(self.robot_config, "lidar_height_offset", 0.5)
+
+        # Foot-mesh footprint sampler. No-op when the active reward config has no
+        # ``penalty_foothold`` term; only then do we import trimesh/shapely/scipy.
+        self._init_foothold_sampling()
+
+    def _foothold_params_from_reward_cfg(self) -> dict:
+        """Return ``penalty_foothold`` term params (grid counts + epsilon), or empty dict."""
+        cfg = getattr(self.reward_manager, "cfg", None)
+        terms = getattr(cfg, "terms", None) if cfg is not None else None
+        if not terms or "penalty_foothold" not in terms:
+            return {}
+        return dict(terms["penalty_foothold"].params)
+
+    def _init_foothold_sampling(self) -> None:
+        """Sole sample grids in each foot frame (mesh footprint sampler).
+
+        Skipped when no ``penalty_foothold`` term is configured, so vanilla locomotion
+        presets (and robots without ankle STLs in the expected location) stay unaffected.
+        """
+        p = self._foothold_params_from_reward_cfg()
+        if not p:
+            return
+
+        import trimesh
+        from scipy.spatial import ConvexHull
+        from shapely.geometry import LineString, Polygon
+
+        self._foothold_LineString = LineString
+        self._foothold_Polygon = Polygon
+        self._foothold_ConvexHull = ConvexHull
+        self._foothold_trimesh = trimesh
+
+        n_long = max(int(p.get("foothold_num_samples_long", 10)), 2)
+        n_wide = max(int(p.get("foothold_num_samples_wide", 5)), 2)
+
+        mesh_dir = self._resolve_foot_mesh_dir()
+        left_mesh = self._find_stl(mesh_dir, self.robot_config.asset.left_foot_mesh)
+        right_mesh = self._find_stl(mesh_dir, self.robot_config.asset.right_foot_mesh)
+        if left_mesh is None or right_mesh is None:
+            raise FileNotFoundError(
+                f"Could not find foot STL meshes in {mesh_dir}. "
+                f"Expected stems: {self.robot_config.asset.left_foot_mesh}, "
+                f"{self.robot_config.asset.right_foot_mesh}"
+            )
+
+        left_xy = self._footprint_sampler_grid(left_mesh, n_long, n_wide)
+        right_xy = self._footprint_sampler_grid(right_mesh, n_long, n_wide)
+        num_samples = min(left_xy.shape[0], right_xy.shape[0])
+
+        left_local = torch.as_tensor(left_xy[:num_samples], device=self.device, dtype=torch.float32)
+        right_local = torch.as_tensor(right_xy[:num_samples], device=self.device, dtype=torch.float32)
+        left_local = torch.cat([left_local, torch.zeros(num_samples, 1, device=self.device)], dim=1)
+        right_local = torch.cat([right_local, torch.zeros(num_samples, 1, device=self.device)], dim=1)
+        self.foot_samples_local = torch.stack([left_local, right_local], dim=0)
+        self.num_foot_samples = num_samples
+
+    def _resolve_foot_mesh_dir(self) -> Path:
+        mesh_root = self.robot_config.asset.mesh_root
+        if mesh_root is not None:
+            return Path(mesh_root)
+        asset_root = self.robot_config.asset.asset_root
+        if asset_root.startswith("@holosoma/"):
+            asset_root = asset_root.replace("@holosoma", get_holosoma_root(), 1)
+        robot_subdir = self.robot_config.asset.robot_type.split("_")[0]
+        return Path(asset_root) / robot_subdir / "meshes"
+
+    def _find_stl(self, mesh_dir: Path, stem: str) -> Path | None:
+        for suffix in (".STL", ".stl"):
+            p = mesh_dir / f"{stem}{suffix}"
+            if p.is_file():
+                return p
+        return None
+
+    def _footprint_sampler_grid(self, mesh_path: Path, num_x_points: int, num_y_points: int) -> np.ndarray:
+        """``footprint_sampler_grid``: convex hull in XY + in-polygon grid sampling."""
+        foot_mesh = self._foothold_trimesh.load_mesh(str(mesh_path))
+        points_2d = np.asarray(foot_mesh.vertices[:, :2], dtype=np.float64)
+        hull = self._foothold_ConvexHull(points_2d)
+        footprint_polygon = self._foothold_Polygon(points_2d[hull.vertices])
+
+        min_x, min_y, max_x, max_y = footprint_polygon.bounds
+        sampled_points: list[tuple[float, float]] = []
+
+        x_cell_width = (max_x - min_x) / (num_x_points * 2)
+        x_coords = np.linspace(min_x + x_cell_width, max_x - x_cell_width, num_x_points)
+        for x in x_coords:
+            vertical_line = self._foothold_LineString([(x, min_y - 1.0), (x, max_y + 1.0)])
+            intersection = footprint_polygon.intersection(vertical_line)
+            if intersection.is_empty:
+                continue
+            slice_min_y, slice_max_y = intersection.bounds[1], intersection.bounds[3]
+            y_cell_width = (slice_max_y - slice_min_y) / (num_y_points * 2)
+            y_coords = np.linspace(slice_min_y + y_cell_width, slice_max_y - y_cell_width, num_y_points)
+            sampled_points.extend((float(x), float(y)) for y in y_coords)
+
+        if not sampled_points:
+            raise RuntimeError(f"footprint_sampler_grid produced no points for {mesh_path}")
+        return np.asarray(sampled_points, dtype=np.float32)
+
+    def _get_terrain_heights_at_points_world(self, pts_world: torch.Tensor) -> torch.Tensor:
+        """Terrain surface Z at each world XY (``pts_world`` shape ``[E, S, 3]``)."""
+        terrain_state = self.terrain_manager.get_state("locomotion_terrain")
+        if terrain_state is None or not hasattr(terrain_state, "query_terrain_heights"):
+            raise RuntimeError(
+                "penalty_foothold requires terrain state 'locomotion_terrain' with query_terrain_heights."
+            )
+        num_envs, num_pts, _ = pts_world.shape
+        xy = pts_world[..., :2].reshape(num_envs * num_pts, 2)
+        h = terrain_state.query_terrain_heights(xy)
+        return h.view(num_envs, num_pts)
 
     def _init_counters(self):
         self.common_step_counter = 0
@@ -201,6 +315,11 @@ class LeggedRobotLocomotionManager(BaseTask):
         state["average_episode_tracker"] = self._get_average_episode_tracker().state_dict()
         if hasattr(self, "reward_penalty_scale"):
             state["reward_penalty_scale"] = float(self.reward_penalty_scale)
+        terrain_curr = self.curriculum_manager.get_term("terrain_level_curriculum")
+        if terrain_curr is not None:
+            terrain_state = terrain_curr.state_dict()
+            if terrain_state:
+                state["terrain_level_curriculum"] = terrain_state
         return state
 
     def load_checkpoint_state(self, state: dict[str, torch.Tensor | float] | None) -> None:
@@ -219,6 +338,12 @@ class LeggedRobotLocomotionManager(BaseTask):
                 self.reward_penalty_scale = float(penalty_state.item())
             else:
                 self.reward_penalty_scale = float(penalty_state)
+
+        terrain_state = state.get("terrain_level_curriculum")
+        if terrain_state is not None:
+            terrain_curr = self.curriculum_manager.get_term("terrain_level_curriculum")
+            if terrain_curr is not None:
+                terrain_curr.load_state_dict(terrain_state)
 
     def synchronize_curriculum_state(self, *, device: str, world_size: int) -> None:
         if world_size <= 1:

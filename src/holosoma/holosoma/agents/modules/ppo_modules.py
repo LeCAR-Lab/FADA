@@ -10,6 +10,9 @@ from holosoma.config_types.algo import ModuleConfig
 
 from .modules import BaseModule
 
+# Minimum scale for Normal distribution; prevents "std >= 0.0" when learned std goes negative.
+MIN_STD_EPS = 1e-6
+
 
 class PPOActor(nn.Module):
     def __init__(
@@ -71,30 +74,42 @@ class PPOActor(nn.Module):
         return self.distribution.entropy().sum(dim=-1)
 
     def update_distribution(self, actor_obs):
+        # Handle both dict and tensor inputs for backward compatibility
+        if isinstance(actor_obs, dict) or (hasattr(actor_obs, "keys") and hasattr(actor_obs, "get")):
+            # Dict-like input: extract actor_obs
+            obs = actor_obs.get("actor_obs")
+            if obs is None:
+                raise ValueError("actor_obs dict must contain 'actor_obs' key")
+            actor_obs = obs
+        # If actor_obs is already a tensor, use it directly
+
         mean = self.actor(actor_obs)
         if self.min_noise_std:
-            clamped_std = torch.clamp(self.std, min=self.min_noise_std)
-            self.distribution = Normal(mean, mean * 0.0 + clamped_std)
+            scale = torch.clamp(self.std, min=self.min_noise_std)
         elif self.min_mean_noise_std:
             current_mean = self.std.mean()
             if current_mean < self.min_mean_noise_std:
                 scale_up = self.min_mean_noise_std / (current_mean + 1e-6)
-                clamped_std = self.std * scale_up
+                scale = self.std * scale_up
             else:
-                clamped_std = self.std
-            self.distribution = Normal(mean, mean * 0.0 + clamped_std)
+                scale = self.std
         else:
-            self.distribution = Normal(mean, mean * 0.0 + self.std)
+            scale = self.std
+        scale = torch.clamp(scale, min=MIN_STD_EPS)
+        scale = torch.nan_to_num(scale, nan=MIN_STD_EPS, posinf=1.0, neginf=MIN_STD_EPS)
+        scale = scale.expand_as(mean)
+        self.distribution = Normal(mean, scale)
 
     def act(self, policy_state_dict):
-        self.update_distribution(policy_state_dict["actor_obs"])
+        self.update_distribution(policy_state_dict)
         return self.distribution.sample()
 
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, policy_state_dict):
-        return self.actor(policy_state_dict["actor_obs"])
+        actor_obs = policy_state_dict["actor_obs"]
+        return self.actor(actor_obs)
 
     def to_cpu(self):
         self.actor = deepcopy(self.actor).to("cpu")

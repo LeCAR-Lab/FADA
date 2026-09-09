@@ -109,6 +109,15 @@ class VideoConfig:
     output_format: str = "h264"
     """Video output format ('mp4' or 'h264'). 'h264' provides better browser compatibility."""
 
+    h264_crf: int = 23
+    """Quality target for H.264 encoding. Larger values are smaller files with lower quality."""
+
+    h264_maxrate: str = "300k"
+    """Optional H.264 peak bitrate cap passed to ffmpeg, e.g. '150k' or '1M'."""
+
+    h264_preset: str = "medium"
+    """ffmpeg H.264 preset. Slower presets usually give smaller files at the same quality."""
+
     save_dir: str | None = None
     """Directory to save video files. If None, uses simulator's default (experiment directory)."""
 

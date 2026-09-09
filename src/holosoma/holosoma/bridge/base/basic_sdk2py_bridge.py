@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import pygame
+import zmq
 from loguru import logger
 
 from holosoma.config_types.robot import RobotConfig
@@ -26,6 +27,8 @@ class BasicSdk2Bridge(ABC):
         self.num_motor = simulator.num_dof  # Generic actuator count
         self.torques = np.zeros(self.num_motor)  # Avoids config/model mismatches
         self.torque_limit = np.array(self.robot.dof_effort_limit_list)
+        self._truth_pose_puber = None
+        self._truth_pose_name = getattr(self.bridge_config, "truth_pose_name", "base")
 
         # joystick
         self.key_map = {
@@ -50,6 +53,7 @@ class BasicSdk2Bridge(ABC):
 
         # Initialize SDK-specific components
         self._init_sdk_components()
+        self._init_truth_pose_publisher()
 
     @abstractmethod
     def _init_sdk_components(self):
@@ -66,6 +70,49 @@ class BasicSdk2Bridge(ABC):
     @abstractmethod
     def compute_torques(self):
         """Compute motor torques. Must be implemented by subclasses."""
+
+    def _init_truth_pose_publisher(self):
+        """Setup optional ZMQ publisher for ground-truth pose."""
+        if not getattr(self.bridge_config, "publish_truth_pose", False):
+            return
+
+        port = getattr(self.bridge_config, "truth_zmq_port", None)
+        if port is None:
+            return
+
+        try:
+            context = zmq.Context.instance()
+            self._truth_pose_puber = context.socket(zmq.PUB)
+            self._truth_pose_puber.bind(f"tcp://*:{port}")
+            self._truth_pose_name = getattr(self.bridge_config, "truth_pose_name", "base")
+            logger.info(f"Ground-truth pose publisher bound to tcp://*:{port}")
+        except Exception as exc:  # noqa: BLE001
+            self._truth_pose_puber = None
+            raise RuntimeError(
+                f"Failed to initialize truth pose publisher on tcp://*:{port}: {exc}"
+            ) from exc
+
+    def publish_truth_pose(self, timestamp: float, position: np.ndarray, orientation_wxyz: np.ndarray) -> None:
+        """Publish base pose for downstream velocity estimation."""
+        if self._truth_pose_puber is None:
+            return
+
+        try:
+            # Convert wxyz -> xyzw to align with mocap publisher example
+            orientation_xyzw = np.concatenate([orientation_wxyz[1:], orientation_wxyz[:1]])
+            message = {
+                "name": self._truth_pose_name,
+                "pose": {
+                    "timestamp": float(timestamp),
+                    "position": position.tolist(),
+                    "orientation": orientation_xyzw.tolist(),
+                },
+            }
+            self._truth_pose_puber.send_pyobj(message, zmq.NOBLOCK)
+        except zmq.Again:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"Failed to publish truth pose: {exc}")
 
     def _compute_pd_torques(self, tau_ff, kp, kd, q_target, dq_target):
         """Helper method for PD control computation (shared logic).
@@ -307,6 +354,14 @@ class BasicSdk2Bridge(ABC):
         quaternion = torch.stack([quat_holosoma[3], quat_holosoma[0], quat_holosoma[1], quat_holosoma[2]])
 
         return quaternion, gyro, acceleration
+
+    def _get_base_pose_data(self):
+        """Get base position and quaternion (wxyz) in numpy arrays."""
+        root_state = self.simulator.robot_root_states[0]
+        pos = root_state[0:3].detach().cpu().numpy()
+        quat_xyzw = root_state[3:7].detach().cpu().numpy()
+        quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
+        return pos, quat_wxyz
 
     def _get_sensor_data(self):
         """Get sensor data (Mujoco-only).

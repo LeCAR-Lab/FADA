@@ -3,7 +3,16 @@ from typing_extensions import Annotated
 
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_values.loco.g1.experiment import g1_29dof, g1_29dof_fast_sac
+from holosoma.config_values.loco.g1.experiment import (
+    g1_29dof_deploy,
+    g1_29dof_oracle,
+)
 from holosoma.config_values.loco.t1.experiment import t1_29dof, t1_29dof_fast_sac
+from holosoma.config_values.loco.t1.experiment import (
+    t1_23dof,
+    t1_23dof_deploy_waist50,
+    t1_23dof_waist50_oracle,
+)
 from holosoma.config_values.wbt.g1.experiment import (
     g1_29dof_wbt,
     g1_29dof_wbt_fast_sac,
@@ -12,10 +21,18 @@ from holosoma.config_values.wbt.g1.experiment import (
 )
 
 DEFAULTS = {
+    # G1 locomotion
     "g1_29dof": g1_29dof,
+    "g1_29dof_deploy": g1_29dof_deploy,
     "g1_29dof_fast_sac": g1_29dof_fast_sac,
+    "g1_29dof_oracle": g1_29dof_oracle,
+    # T1 locomotion
     "t1_29dof": t1_29dof,
     "t1_29dof_fast_sac": t1_29dof_fast_sac,
+    "t1_23dof": t1_23dof,
+    "t1_23dof_deploy_waist50": t1_23dof_deploy_waist50,
+    "t1_23dof_waist50_oracle": t1_23dof_waist50_oracle,
+    # G1 WBT
     "g1_29dof_wbt": g1_29dof_wbt,
     "g1_29dof_wbt_w_object": g1_29dof_wbt_w_object,
     "g1_29dof_wbt_fast_sac": g1_29dof_wbt_fast_sac,

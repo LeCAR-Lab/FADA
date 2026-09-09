@@ -1,15 +1,24 @@
+#!/usr/bin/env bash
 # Exit on error, and print commands
 set -ex
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 ROOT_DIR=$(dirname "$SCRIPT_DIR")
 
+if ! command -v sudo &> /dev/null; then
+  # in docker build sudo isn't avaiable, but its ok
+  echo "Warning: sudo could not be found, you may need to run this script with sudo"
+  function sudo { "$@"; }
+  export -f sudo
+fi
+
 # Use CONDA_ENV_NAME if provided, otherwise default to "hssim"
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-hssim}
 echo "conda environment name is set to: $CONDA_ENV_NAME"
 
-# Create overall workspace
+# WORKSPACE_DIR, conda/pip caches, TMPDIR: scripts/source_common.sh
 source ${SCRIPT_DIR}/source_common.sh
+export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 ENV_ROOT=$CONDA_ROOT/envs/$CONDA_ENV_NAME
 SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_$CONDA_ENV_NAME
 echo "SENTINEL_FILE: $SENTINEL_FILE"
@@ -56,17 +65,39 @@ if [[ ! -f $SENTINEL_FILE ]]; then
     git clone https://github.com/isaac-sim/IsaacLab.git --branch v2.3.0 $WORKSPACE_DIR/IsaacLab
   fi
 
-  sudo apt install -y cmake build-essential
+  if ! command -v cmake >/dev/null 2>&1; then
+    echo "cmake not found; installing via conda-forge into current env..."
+    conda install -c conda-forge -y cmake
+  fi
+  if ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
+    echo "Missing required build tools (make/gcc)." >&2
+    echo "Please ask an administrator to install: build-essential" >&2
+    exit 1
+  fi
   cd $WORKSPACE_DIR/IsaacLab
+  # setuptools 81 removes pkg_resoures, a dep needs that
+  # see https://github.com/isaac-sim/IsaacLab/pull/4585
+  pip install 'setuptools<81'
+  echo 'setuptools<81' > build-constraints.txt
+  export PIP_BUILD_CONSTRAINT="$(realpath build-constraints.txt)"
+  # Fix upstream bug: should use flatdict 4.1.0 (https://github.com/isaac-sim/IsaacLab/issues/4576)
+  sed -i 's/flatdict==4.0.1/flatdict==4.1.0/' source/isaaclab/setup.py
   # work-around for egl_probe cmake max version issue
   export CMAKE_POLICY_VERSION_MINIMUM=3.5
-  ./isaaclab.sh --install
+  export OMNI_KIT_ACCEPT_EULA=${OMNI_KIT_ACCEPT_EULA:-1}
+  TERM=xterm ./isaaclab.sh --install
+  unset PIP_BUILD_CONSTRAINT
 
  # Install Holosoma
   pip install -U pip
-  pip install -e $ROOT_DIR/src/holosoma[unitree,booster]
+  # `--no-deps` keeps pip from re-resolving the dependency graph IsaacLab's own
+  # installer just pinned above (flatdict, packaging, setuptools<81, ...). holosoma's
+  # own requirements are compatible with that graph: it declares
+  # `numpy>=1.23.5,<2.4` (src/holosoma/pyproject.toml), which the `numpy==1.26.0`
+  # isaacsim-kernel 5.1 requires satisfies.
+  pip install --no-deps $ROOT_DIR/src/holosoma[unitree,booster]
 
-  # Force upgrade wandb to override rl-games constraint
-  pip install --upgrade 'wandb>=0.21.1'
+  # Keep wandb pinned to project requirement
+  pip install --upgrade 'wandb==0.22.0'
   touch $SENTINEL_FILE
 fi

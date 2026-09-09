@@ -17,6 +17,11 @@ PROJECT_ROOT="$( cd "$SCRIPT_DIR/../../.." && pwd )"
 CONTAINER_NAME="holosoma-inference-container"
 IMAGE_NAME="holosoma-inference"
 
+# Mount bash history in the host filesystem in order to preserve history between containers
+HOLOSOMA_DEPS_DIR="$HOME/.holosoma_deps"
+mkdir -p "$HOLOSOMA_DEPS_DIR"
+touch "$HOLOSOMA_DEPS_DIR/bash_history"
+
 # Function to create a new container
 create_container() {
     local mounts=(
@@ -25,6 +30,8 @@ create_container() {
         -v /tmp/.X11-unix:/tmp/.X11-unix
         -v $HOME/.Xauthority:/root/.Xauthority:ro
         -v /dev/shm:/dev/shm
+        -v /dev/input:/dev/input
+        -v "$HOLOSOMA_DEPS_DIR/bash_history":/root/.bash_history
     )
     [[ -d "$EXT_DIR" ]] && mounts+=(-v "$EXT_DIR":/workspace/holosoma-extension) # optionally mount extension repo
 

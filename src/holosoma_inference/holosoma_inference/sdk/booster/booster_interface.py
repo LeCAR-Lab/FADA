@@ -4,17 +4,51 @@ import numpy as np
 from termcolor import colored
 
 from holosoma_inference.config.config_types import RobotConfig
+from holosoma_inference.config.config_types.task import TaskConfig
 from holosoma_inference.sdk.base.base_interface import BaseInterface
 
 
 class BoosterInterface(BaseInterface):
     """Interface for Booster robots using sdk2py."""
 
-    def __init__(self, robot_config: RobotConfig, domain_id=0, interface_str=None, use_joystick=True):
-        super().__init__(robot_config, domain_id, interface_str, use_joystick)
+    def __init__(
+        self,
+        robot_config: RobotConfig,
+        domain_id=0,
+        interface_str=None,
+        use_joystick=True,
+        task_config: TaskConfig | None = None,
+    ):
+        super().__init__(robot_config, domain_id, interface_str, use_joystick, task_config)
+        self._sync_low_state_array: np.ndarray | None = None
+        self._sync_low_state_tick: int | None = None
         self._init_sdk2py()
         if use_joystick:
             self._init_joystick()
+
+    def reset_low_state_cache(self) -> None:
+        """Drop cached low-state so the next read must come from a fresh publish."""
+        self._sync_low_state_array = None
+        self._sync_low_state_tick = None
+        if hasattr(self.state_processor, "robot_state_data"):
+            self.state_processor.robot_state_data = None
+
+    def set_sync_low_state_array(self, low_state_array, tick: int | None = None) -> None:
+        """Install a lock-step sim low-state snapshot received on the sync ZMQ channel.
+
+        Sim publishes a 13 + 2*ndof array — base_pos(3) + quat(4) + joint_pos(ndof) +
+        base_lin_vel(3) + base_ang_vel(3) + joint_vel(ndof). We mirror UnitreeInterface
+        exactly: store as-is, no padding. Downstream policy code reads only this
+        prefix; the ``tau_est`` / ``ddq`` tails Booster's DDS state_processor produces
+        are absent here, but those entries are not consumed by inference (logging
+        slices that touch them get empty arrays the same way as the G1 path does).
+        Bypassing the async DDS callback is what makes Booster bit-exact under
+        ``sync_sim_policy``.
+        """
+        self._sync_low_state_array = (
+            np.asarray(low_state_array, dtype=np.float64).reshape(1, -1).copy()
+        )
+        self._sync_low_state_tick = int(tick) if tick is not None else None
 
     def _init_sdk2py(self):
         """Initialize sdk2py components."""
@@ -48,6 +82,8 @@ class BoosterInterface(BaseInterface):
 
     def get_low_state(self) -> np.ndarray:
         """Get robot state as numpy array."""
+        if self._sync_low_state_array is not None:
+            return self._sync_low_state_array.copy()
         return self.state_processor.get_robot_state_data()
 
     def send_low_command(
@@ -68,6 +104,13 @@ class BoosterInterface(BaseInterface):
             kp_override=kp_override,
             kd_override=kd_override,
         )
+
+    def get_sync_low_cmd_payload(self):
+        """Return the latest command snapshot for lock-step sim, if available."""
+        getter = getattr(self.command_sender, "get_sync_low_cmd_payload", None)
+        if getter is None:
+            return None
+        return getter()
 
     def get_joystick_msg(self):
         """Get wireless controller message."""

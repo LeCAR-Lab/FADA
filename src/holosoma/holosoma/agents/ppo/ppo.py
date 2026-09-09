@@ -5,9 +5,10 @@ import os
 from typing import TypedDict
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from loguru import logger
-from rich.console import Console
+from rich.progress import track
 from torch import nn
 from torch.distributions import Normal, kl_divergence
 from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
@@ -32,8 +33,71 @@ from holosoma.utils.inference_helpers import (
     get_control_gains_from_config,
     get_urdf_text_from_robot_config,
 )
+from holosoma.utils.safe_torch_load import load_checkpoint as safe_load_checkpoint
 
-console = Console()
+
+class EmpiricalNormalization(nn.Module):
+    """Normalize mean and variance of values based on empirical values."""
+
+    def __init__(self, shape, device, eps=1e-2, until=None):
+        super().__init__()
+        self.eps = eps
+        self.until = until
+        self.device = device
+        self.register_buffer("_mean", torch.zeros(shape).unsqueeze(0).to(device))
+        self.register_buffer("_var", torch.ones(shape).unsqueeze(0).to(device))
+        self.register_buffer("_std", torch.ones(shape).unsqueeze(0).to(device))
+        self.register_buffer("count", torch.tensor(0, dtype=torch.long).to(device))
+
+    @torch.no_grad()
+    def forward(self, x: torch.Tensor, center: bool = True, update: bool = True) -> torch.Tensor:
+        if x.shape[1:] != self._mean.shape[1:]:
+            raise ValueError(f"Expected input of shape (*,{self._mean.shape[1:]}), got {x.shape}")
+
+        if self.training and update:
+            self.update(x)
+        if center:
+            return (x - self._mean) / (self._std + self.eps)
+        return x / (self._std + self.eps)
+
+    @torch.jit.unused
+    def update(self, x):
+        if self.until is not None and self.count >= self.until:
+            return
+
+        if dist.is_available() and dist.is_initialized():
+            local_batch_size = x.shape[0]
+            world_size = dist.get_world_size()
+            global_batch_size = world_size * local_batch_size
+
+            x_shifted = x - self._mean
+            local_sum_shifted = torch.sum(x_shifted, dim=0, keepdim=True)
+            local_sum_sq_shifted = torch.sum(x_shifted.pow(2), dim=0, keepdim=True)
+
+            stats_to_sync = torch.cat([local_sum_shifted, local_sum_sq_shifted], dim=0)
+            dist.all_reduce(stats_to_sync, op=dist.ReduceOp.SUM)
+            global_sum_shifted, global_sum_sq_shifted = stats_to_sync
+
+            batch_mean_shifted = global_sum_shifted / global_batch_size
+            batch_var = global_sum_sq_shifted / global_batch_size - batch_mean_shifted.pow(2)
+            batch_mean = batch_mean_shifted + self._mean
+        else:
+            global_batch_size = x.shape[0]
+            batch_mean = torch.mean(x, dim=0, keepdim=True)
+            batch_var = torch.var(x, dim=0, keepdim=True, unbiased=False)
+
+        new_count = self.count + global_batch_size
+
+        delta = batch_mean - self._mean
+        self._mean.copy_(self._mean + delta * (global_batch_size / new_count))
+
+        delta2 = batch_mean - self._mean
+        m_a = self._var * self.count
+        m_b = batch_var * global_batch_size
+        M2 = m_a + m_b + delta2.pow(2) * (self.count * global_batch_size / new_count)
+        self._var.copy_(M2 / new_count)
+        self._std.copy_(self._var.sqrt())
+        self.count.copy_(new_count)
 
 
 class Minibatch(TypedDict):
@@ -155,6 +219,7 @@ class PPO(BaseAlgo):
 
         # Observation related Config
         self.use_symmetry = self.config.use_symmetry
+        self.empirical_normalization = self.config.empirical_normalization
         self._init_obs_keys()
 
     def _init_obs_keys(self):
@@ -187,6 +252,15 @@ class PPO(BaseAlgo):
             device=self.device,
             history_length=self.algo_history_length_dict,
         )
+
+        actor_obs_dim = self._get_obs_dim(self.actor_obs_keys)
+        critic_obs_dim = self._get_obs_dim(self.critic_obs_keys)
+        if self.empirical_normalization:
+            self.actor_obs_normalizer: nn.Module = EmpiricalNormalization(shape=actor_obs_dim, device=self.device)
+            self.critic_obs_normalizer: nn.Module = EmpiricalNormalization(shape=critic_obs_dim, device=self.device)
+        else:
+            self.actor_obs_normalizer = nn.Identity()
+            self.critic_obs_normalizer = nn.Identity()
 
         if self.use_symmetry:
             self.symmetry_utils = SymmetryUtils(self.env)
@@ -221,6 +295,16 @@ class PPO(BaseAlgo):
         actor_obs_dim = self._get_obs_dim(self.actor_obs_keys)
         return torch.zeros(1, actor_obs_dim, device=self.device)
 
+    def _normalize_actor_obs(self, actor_obs: torch.Tensor, update: bool = True) -> torch.Tensor:
+        if self.empirical_normalization:
+            return self.actor_obs_normalizer(actor_obs, update=update)
+        return actor_obs
+
+    def _normalize_critic_obs(self, critic_obs: torch.Tensor, update: bool = True) -> torch.Tensor:
+        if self.empirical_normalization:
+            return self.critic_obs_normalizer(critic_obs, update=update)
+        return critic_obs
+
     def _setup_storage(self):
         self.storage = RolloutStorage(self.env.num_envs, self.config.num_steps_per_env, device=self.device)
         actor_obs_dim = self._get_obs_dim(self.actor_obs_keys)
@@ -249,10 +333,14 @@ class PPO(BaseAlgo):
     def _eval_mode(self):
         self.actor.eval()
         self.critic.eval()
+        self.actor_obs_normalizer.eval()
+        self.critic_obs_normalizer.eval()
 
     def _train_mode(self):
         self.actor.train()
         self.critic.train()
+        self.actor_obs_normalizer.train()
+        self.critic_obs_normalizer.train()
 
     def learn(self):
         self._train_mode()
@@ -299,8 +387,10 @@ class PPO(BaseAlgo):
         with torch.inference_mode():
             for _ in range(self.config.num_steps_per_env):
                 # Environment step
-                actor_obs = torch.cat([obs_dict[k] for k in self.actor_obs_keys], dim=1)
-                critic_obs = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
+                actor_obs_raw = torch.cat([obs_dict[k] for k in self.actor_obs_keys], dim=1)
+                critic_obs_raw = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
+                actor_obs = self._normalize_actor_obs(actor_obs_raw)
+                critic_obs = self._normalize_critic_obs(critic_obs_raw)
 
                 actions = self.actor.act({"actor_obs": actor_obs})
                 values = self.critic.evaluate({"critic_obs": critic_obs}).detach()
@@ -315,6 +405,7 @@ class PPO(BaseAlgo):
                 final_rewards = torch.zeros_like(rewards)
                 if infos["time_outs"].any():
                     final_critic_obs = torch.cat([infos["final_observations"][k] for k in self.critic_obs_keys], dim=1)
+                    final_critic_obs = self._normalize_critic_obs(final_critic_obs, update=False)
                     final_values = self.critic.evaluate({"critic_obs": final_critic_obs}).detach()
                     final_rewards += self.config.gamma * torch.squeeze(
                         final_values * infos["time_outs"].unsqueeze(1).to(self.device), 1
@@ -343,6 +434,7 @@ class PPO(BaseAlgo):
 
             # Return / Advantage computation
             last_critic_obs = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
+            last_critic_obs = self._normalize_critic_obs(last_critic_obs, update=False)
             last_values = self.critic.evaluate({"critic_obs": last_critic_obs}).detach().to(self.device)
             returns, advantages = self._compute_returns_and_advantages(
                 last_values,
@@ -557,9 +649,13 @@ class PPO(BaseAlgo):
     def load(self, ckpt_path: str | None) -> dict | None:
         if ckpt_path is not None:
             logger.info(f"Loading checkpoint from {ckpt_path}")
-            loaded_dict = torch.load(ckpt_path, map_location=self.device)
+            loaded_dict = safe_load_checkpoint(ckpt_path, map_location=self.device)
             self.actor.load_state_dict(loaded_dict["actor_model_state_dict"])
             self.critic.load_state_dict(loaded_dict["critic_model_state_dict"])
+            if self.empirical_normalization and loaded_dict.get("actor_obs_normalizer_state_dict") is not None:
+                self.actor_obs_normalizer.load_state_dict(loaded_dict["actor_obs_normalizer_state_dict"])
+            if self.empirical_normalization and loaded_dict.get("critic_obs_normalizer_state_dict") is not None:
+                self.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_normalizer_state_dict"])
             if self.config.load_optimizer:
                 self.actor_optimizer.load_state_dict(loaded_dict["actor_optimizer_state_dict"])
                 self.critic_optimizer.load_state_dict(loaded_dict["critic_optimizer_state_dict"])
@@ -577,6 +673,12 @@ class PPO(BaseAlgo):
             "critic_model_state_dict": self.critic.state_dict(),
             "actor_optimizer_state_dict": self.actor_optimizer.state_dict(),
             "critic_optimizer_state_dict": self.critic_optimizer.state_dict(),
+            "actor_obs_normalizer_state_dict": (
+                self.actor_obs_normalizer.state_dict() if self.empirical_normalization else None
+            ),
+            "critic_obs_normalizer_state_dict": (
+                self.critic_obs_normalizer.state_dict() if self.empirical_normalization else None
+            ),
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
@@ -617,6 +719,11 @@ class PPO(BaseAlgo):
         # Extract control gains and velocity limits & attach to onnx as metadata
         kp_list, kd_list = get_control_gains_from_config(self.env.robot_config)
         cmd_ranges = get_command_ranges_from_env(self.env)
+        action_scales = getattr(self.env, "action_scales", None)
+        if action_scales is None:
+            action_scale_metadata: float | list[float] = float(self.env.robot_config.control.action_scale)
+        else:
+            action_scale_metadata = action_scales.detach().cpu().tolist()
         # Extract URDF text from the robot config
         urdf_file_path, urdf_str = get_urdf_text_from_robot_config(self.env.robot_config)
 
@@ -624,6 +731,7 @@ class PPO(BaseAlgo):
             "dof_names": self.env.robot_config.dof_names,
             "kp": kp_list,
             "kd": kd_list,
+            "action_scale": action_scale_metadata,
             "command_ranges": cmd_ranges,
             "robot_urdf": urdf_str,
             "robot_urdf_path": urdf_file_path,
@@ -710,14 +818,18 @@ class PPO(BaseAlgo):
     @property
     def actor_onnx_wrapper(self):
         class ActorWrapper(nn.Module):
-            def __init__(self, actor):
+            def __init__(self, actor, actor_obs_normalizer, empirical_normalization):
                 super().__init__()
                 self.actor = actor
+                self.actor_obs_normalizer = actor_obs_normalizer
+                self.empirical_normalization = empirical_normalization
 
             def forward(self, actor_obs):
+                if self.empirical_normalization:
+                    actor_obs = self.actor_obs_normalizer(actor_obs, update=False)
                 return self.actor.act_inference({"actor_obs": actor_obs})
 
-        return ActorWrapper(self.actor)
+        return ActorWrapper(self.actor, self.actor_obs_normalizer, self.empirical_normalization)
 
     def env_step(self, actor_state):
         obs_dict, rewards, dones, extras = self.env.step(actor_state)
@@ -793,6 +905,197 @@ class PPO(BaseAlgo):
 
     def get_inference_policy(self, device=None):
         self.actor.eval()  # switch to evaluation mode (dropout for example)
+        self.actor_obs_normalizer.eval()
         if device is not None:
             self.actor.to(device)
-        return self.actor.act_inference
+            self.actor_obs_normalizer.to(device)
+
+        def policy_fn(obs: dict[str, torch.Tensor]) -> torch.Tensor:
+            actor_obs = self._normalize_actor_obs(obs["actor_obs"], update=False)
+            return self.actor.act_inference({"actor_obs": actor_obs})
+
+        return policy_fn
+
+
+class PPO_Deploy(PPO):
+    """
+    PPO_Deploy class for custom modifications with data collection support.
+    
+    This class inherits from PPO and adds data collection functionality to evaluate_policy.
+    """
+
+    def __init__(self, env: BaseTask, config: PPOConfig, log_dir, device="cpu", multi_gpu_cfg: dict | None = None):
+        """Initialize PPO_Deploy with same parameters as base PPO."""
+        super().__init__(env, config, log_dir, device, multi_gpu_cfg)
+        self._eval_data_collector = None
+
+    @torch.no_grad()
+    def evaluate_policy(
+        self,
+        max_eval_steps: int | None = None,
+        collect_data_config: dict | None = None,
+    ):
+        """
+        Evaluate policy with optional data collection.
+
+        Runs a single evaluation episode. If `max_eval_steps` is provided, stop
+        at that step budget; otherwise run until callbacks mark the episode
+        complete (e.g., all envs done).
+        """
+        self._create_eval_callbacks()
+        self._pre_evaluate_policy()
+        self.eval_policy = self.get_inference_policy()
+        # Expose eval step budget to callbacks (for early-stop logic)
+        self._eval_max_steps = max_eval_steps
+
+        if collect_data_config and collect_data_config.get("collect_data", False):
+            from pathlib import Path
+            from holosoma.utils.data_collector import DataCollector
+            from holosoma.utils.experiment_paths import get_timestamp
+
+            robot_type = getattr(self.env.robot_config.asset, "robot_type", "unknown")
+            simulator = getattr(self.env, "simulator", None)
+            simulator_type = simulator.__class__.__name__.lower() if simulator is not None else "unknown"
+            checkpoint_path = None
+
+            obs_dict = None
+            if hasattr(self.env, "observation_manager") and self.env.observation_manager:
+                obs_dict = {
+                    group_name: list(self.env.observation_manager.cfg.groups[group_name].terms.keys())
+                    for group_name in self.env.observation_manager.cfg.groups.keys()
+                }
+            elif hasattr(self.env, "config") and hasattr(self.env.config, "obs") and hasattr(self.env.config.obs, "obs_dict"):
+                obs_dict = dict(self.env.config.obs.obs_dict)
+
+            timestamp = get_timestamp()
+            base_output_dir = Path(collect_data_config.get("output_dir", "logs_data_collection"))
+            timestamped_output_dir = base_output_dir / f"{timestamp}_{simulator_type}_{robot_type}"
+
+            self._eval_data_collector = DataCollector(
+                output_dir=str(timestamped_output_dir),
+                dataset_name=collect_data_config.get("dataset_name", "inference_dataset"),
+                compress=collect_data_config.get("compress", True),
+                batch_size=collect_data_config.get("batch_size", 10),
+                robot_type=robot_type,
+                simulator=simulator_type,
+                policy_checkpoint=checkpoint_path,
+                num_envs=self.env.num_envs,
+                obs_dict=obs_dict,
+                skip_obs_keys=tuple(collect_data_config.get("skip_obs_keys", ())),
+            )
+            logger.info(
+                f"Data collection enabled: {timestamped_output_dir}/{collect_data_config.get('dataset_name', 'inference_dataset')}.h5"
+            )
+
+        try:
+            actor_state = self._create_actor_state()
+            obs_dict = self.env.reset_all()
+            init_actions = torch.zeros(self.env.num_envs, self.num_act, device=self.device)
+            actor_state.update(
+                {
+                    "obs": obs_dict,
+                    "actions": init_actions,
+                    "dones": torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device),
+                    "rewards": torch.zeros(self.env.num_envs, device=self.device),
+                    "episode_complete": False,
+                }
+            )
+
+            actor_state["obs"]["critic_obs"] = torch.cat(
+                [actor_state["obs"][k] for k in self.critic_obs_keys], dim=1
+            )
+
+            self._on_eval_episode_start(actor_state)
+            self._reset_callback_states()
+
+            step_iter = (
+                track(range(max_eval_steps), description="Evaluating", transient=True)
+                if max_eval_steps is not None
+                else itertools.count()
+            )
+            for step in step_iter:
+                actor_state["step"] = step
+                actor_state = self._pre_eval_env_step(actor_state)
+                actor_state = self._before_eval_env_step(actor_state)
+                actor_state = self.env_step(actor_state)
+                actor_state["obs"]["critic_obs"] = torch.cat(
+                    [actor_state["obs"][k] for k in self.critic_obs_keys], dim=1
+                )
+
+                actor_state = self._after_eval_env_step(actor_state)
+                actor_state = self._post_eval_env_step(actor_state)
+
+                # Stop early when callbacks mark episode_complete (e.g., all envs done)
+                if actor_state.get("episode_complete"):
+                    break
+
+            self._on_eval_episode_end(actor_state)
+            self._collect_final_eval_data()
+            self._post_evaluate_policy()
+        finally:
+            if hasattr(self, "_eval_max_steps"):
+                del self._eval_max_steps
+            if self._eval_data_collector is not None:
+                self._eval_data_collector.close()
+                self._eval_data_collector = None
+                logger.info("Data collection completed")
+
+    def _create_eval_callbacks(self):
+        self.eval_callbacks = []
+        if self.config.eval_callbacks is not None:
+            for cb_name in self.config.eval_callbacks:
+                cb_cfg = self.config.eval_callbacks[cb_name]
+
+                if isinstance(cb_cfg, dict):
+                    inner_cfg = cb_cfg.get("config", {})
+                    if isinstance(inner_cfg, dict):
+                        if "log_dir" not in inner_cfg or inner_cfg.get("log_dir") is None:
+                            inner_cfg["log_dir"] = self.log_dir
+                        if hasattr(self.env, "sim_dt") and inner_cfg.get("sim_dt") is None:
+                            inner_cfg["sim_dt"] = self.env.sim_dt
+                        if inner_cfg.get("plot_update_interval") is None:
+                            inner_cfg["plot_update_interval"] = 500
+                        cb_cfg["config"] = inner_cfg
+                    self.eval_callbacks.append(instantiate(cb_cfg, training_loop=self))
+                else:
+                    inner_cfg = getattr(cb_cfg, "config", None)
+                    if inner_cfg is not None:
+                        if getattr(inner_cfg, "log_dir", None) is None:
+                            inner_cfg.log_dir = self.log_dir
+                        if getattr(inner_cfg, "sim_dt", None) is None and hasattr(self.env, "sim_dt"):
+                            inner_cfg.sim_dt = self.env.sim_dt
+                        if getattr(inner_cfg, "plot_update_interval", None) is None:
+                            inner_cfg.plot_update_interval = 500
+                    self.eval_callbacks.append(instantiate(cb_cfg, training_loop=self))
+
+    def _reset_callback_states(self):
+        for callback in self.eval_callbacks:
+            if hasattr(callback, "reset_for_next_episode"):
+                callback.reset_for_next_episode()
+
+    def _collect_final_eval_data(self):
+        for callback in self.eval_callbacks:
+            if hasattr(callback, "get_all_episode_data"):
+                callback.get_all_episode_data()
+
+    def _on_eval_episode_start(self, actor_state: dict) -> None:
+        if self._eval_data_collector is not None:
+            self._eval_data_collector.start_episode()
+            actor_state.setdefault("rewards", torch.zeros(self.env.num_envs, device=self.device))
+            actor_state.setdefault("dones", torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device))
+
+    def _on_eval_episode_end(self, actor_state: dict) -> None:
+        return None
+
+    def _before_eval_env_step(self, actor_state: dict) -> dict:
+        if self._eval_data_collector is not None:
+            self._eval_data_collector.collect_step(
+                obs_dict=actor_state["obs"],
+                actions=actor_state["actions"],
+                dones=actor_state.get("dones", torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)),
+                rewards=actor_state.get("rewards", torch.zeros(self.env.num_envs, device=self.device)),
+            )
+        return actor_state
+
+    def _after_eval_env_step(self, actor_state: dict) -> dict:
+        return actor_state

@@ -11,6 +11,7 @@ from holosoma.managers.observation import ObservationManager
 from holosoma.managers.randomization import RandomizationManager
 from holosoma.managers.reset_events.manager import ResetEventManager
 from holosoma.managers.reward import RewardManager
+from holosoma.managers.reward import MultiAgentRewardManager
 from holosoma.managers.termination import TerminationManager
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
@@ -428,7 +429,6 @@ class BaseTask:
         self._update_counters_each_step()
 
         self._pre_compute_observations_callback()
-        self._update_tasks_callback()  # needs to be called before reset_envs_idx
         self._check_termination()
         self._compute_reward()
         self._update_log_dict()
@@ -443,6 +443,11 @@ class BaseTask:
         refresh_env_ids = self._ensure_long_tensor(self._get_envs_to_refresh())
         if refresh_env_ids.numel() > 0:
             self._refresh_envs_after_reset(refresh_env_ids)
+
+        # Update commands, curriculum, and interval randomization AFTER reset,
+        # so that termination is checked on actual physics state before
+        # clip-end resets erase it.
+        self._update_tasks_callback()
 
         self._compute_observations()
 
@@ -488,6 +493,12 @@ class BaseTask:
         self.rew_buf[:] = self.reward_manager.compute(self.dt)
         self.episode_sums = getattr(self.reward_manager, "episode_sums", {})
         self.episode_sums_raw = getattr(self.reward_manager, "episode_sums_raw", {})
+        if isinstance(self.reward_manager, MultiAgentRewardManager):
+            ma_keys = self.reward_manager.cfg.multi_agent_body_keys
+            if ma_keys is not None:
+                self.extras["rewards_ma"] = {
+                    k: self.reward_manager.last_multi_agent_rewards[k] for k in ma_keys
+                }
 
     def _compute_observations(self):
         self.obs_buf_dict = self.observation_manager.compute()

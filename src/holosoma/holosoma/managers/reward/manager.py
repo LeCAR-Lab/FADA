@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 from holosoma.config_types.reward import RewardManagerCfg, RewardTermCfg
+from holosoma.config_types.reward import MultiAgentRewardManagerCfg, MultiAgentRewardTermCfg
 
 from .base import RewardTermBase
 
@@ -30,6 +31,16 @@ class RewardManager:
         Device where tensors should be allocated.
     """
 
+    def __new__(cls, cfg: RewardManagerCfg, env: Any, device: str):
+        # FADA: dispatch to MultiAgentRewardManager for MultiAgentRewardManagerCfg
+        # configs without requiring callers (e.g. BaseTask) to branch on cfg type.
+        # Returning a bare object() of the subtype (not a fully-constructed
+        # instance) avoids double-running __init__: Python's normal protocol
+        # then calls MultiAgentRewardManager.__init__ exactly once on it.
+        if cls is RewardManager and isinstance(cfg, MultiAgentRewardManagerCfg):
+            return object.__new__(MultiAgentRewardManager)
+        return super().__new__(cls)
+
     def __init__(self, cfg: RewardManagerCfg, env: Any, device: str):
         self.cfg = cfg
         self.env = env
@@ -51,9 +62,23 @@ class RewardManager:
         # Episode sums for each term (for logging)
         self._episode_sums: dict[str, torch.Tensor] = {}
         self._episode_sums_raw: dict[str, torch.Tensor] = {}
+        self.last_scaled_term_rewards: dict[str, torch.Tensor] = {}
+        self.last_raw_term_rewards: dict[str, torch.Tensor] = {}
         for term_name in self._term_names:
             self._episode_sums[term_name] = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
             self._episode_sums_raw[term_name] = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+
+    _TERM_ALIASES = {
+        "track_lin_vel_xy": "tracking_lin_vel",
+        "track_ang_vel_z": "tracking_ang_vel",
+    }
+
+    def _add_episode_aliases(self, metrics: dict[str, torch.Tensor], prefix: str) -> None:
+        for source_name, alias_name in self._TERM_ALIASES.items():
+            source_key = f"{prefix}{source_name}"
+            alias_key = f"{prefix}{alias_name}"
+            if source_key in metrics:
+                metrics.setdefault(alias_key, metrics[source_key])
 
     def _initialize_terms(self) -> None:
         """Initialize reward terms and resolve their functions/classes."""
@@ -147,6 +172,8 @@ class RewardManager:
         """
         # Reset computation
         self._reward_buf[:] = 0.0
+        self.last_scaled_term_rewards = {}
+        self.last_raw_term_rewards = {}
 
         # Iterate over all reward terms
         for term_name, term_cfg in zip(self._term_names, self._term_cfgs):
@@ -169,6 +196,8 @@ class RewardManager:
 
             # Scale by weight and dt
             rew_scaled = rew_raw * term_cfg.weight * dt
+            self.last_scaled_term_rewards[term_name] = rew_scaled.detach().clone()
+            self.last_raw_term_rewards[term_name] = rew_raw.detach().clone()
 
             # Accumulate
             self._reward_buf += rew_scaled
@@ -226,9 +255,15 @@ class RewardManager:
         def _clone(tensor: torch.Tensor) -> torch.Tensor:
             return tensor.detach().clone()
 
+        # Normalize by max episode length (matches FAR-Holosoma reference). A constant
+        # divisor avoids dividing by a per-env length that is still 0 (before an env's first
+        # reset, or after init_at_random_ep_len).
+        # Interpretation: "fraction of the max-possible reward over a full max-length episode."
+        max_ep_len_s = max(float(self.env.max_episode_length_s), float(self.env.dt))
+
         # Populate scaled reward statistics
         for term_name in self._term_names:
-            rew_all = self._episode_sums[term_name] / self.env.max_episode_length_s
+            rew_all = self._episode_sums[term_name] / max_ep_len_s
             extras["episode_all"][f"rew_{term_name}"] = _clone(rew_all)
             if env_ids_tensor is None:
                 extras["episode"][f"rew_{term_name}"] = _clone(rew_all)
@@ -240,7 +275,7 @@ class RewardManager:
 
         # Populate raw (unscaled) reward statistics
         for term_name in self._term_names:
-            rew_raw_all = self._episode_sums_raw[term_name] / self.env.max_episode_length_s
+            rew_raw_all = self._episode_sums_raw[term_name] / max_ep_len_s
             extras["raw_episode_all"][f"raw_rew_{term_name}"] = _clone(rew_raw_all)
             if env_ids_tensor is None:
                 extras["raw_episode"][f"raw_rew_{term_name}"] = _clone(rew_raw_all)
@@ -249,11 +284,58 @@ class RewardManager:
 
             self._episode_sums_raw[term_name][env_ids_slice] = 0.0
 
+        self._add_episode_aliases(extras["episode"], prefix="rew_")
+        self._add_episode_aliases(extras["episode_all"], prefix="rew_")
+        self._add_episode_aliases(extras["raw_episode"], prefix="raw_rew_")
+        self._add_episode_aliases(extras["raw_episode_all"], prefix="raw_rew_")
+
         # Reset stateful reward terms
         for instance in self._term_instances.values():
             instance.reset(env_ids=env_ids_tensor)
 
         return extras
+
+    def get_episode_rates(self, env_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Return reward rate for the given envs, normalized by max episode length.
+
+        Use this to include envs that have not yet reset in episode logging, so the
+        mean is over all envs (completed + ongoing), not just failed/short episodes.
+
+        Normalization matches :meth:`reset` (and FAR-Holosoma reference) — divides by
+        ``max_episode_length_s`` so per-term values are comparable across short / long
+        episodes and across the same vs. different runs.
+
+        Parameters
+        ----------
+        env_ids : torch.Tensor
+            Environment indices, shape (n,) or (n, 1).
+
+        Returns
+        -------
+        dict[str, torch.Tensor]
+            Keys like ``rew_{term_name}``, values shape (n,) with normalized rate per env.
+        """
+        if env_ids.numel() == 0:
+            return {}
+        env_ids = env_ids.flatten().to(device=self.device)
+        max_ep_len_s = max(float(self.env.max_episode_length_s), float(self.env.dt))
+        out: dict[str, torch.Tensor] = {}
+        for term_name in self._term_names:
+            out[f"rew_{term_name}"] = (self._episode_sums[term_name][env_ids] / max_ep_len_s).detach()
+        self._add_episode_aliases(out, prefix="rew_")
+        return out
+
+    def get_raw_episode_rates(self, env_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Return raw (unscaled) reward rate, normalized by ``max_episode_length_s``."""
+        if env_ids.numel() == 0:
+            return {}
+        env_ids = env_ids.flatten().to(device=self.device)
+        max_ep_len_s = max(float(self.env.max_episode_length_s), float(self.env.dt))
+        out: dict[str, torch.Tensor] = {}
+        for term_name in self._term_names:
+            out[f"raw_rew_{term_name}"] = (self._episode_sums_raw[term_name][env_ids] / max_ep_len_s).detach()
+        self._add_episode_aliases(out, prefix="raw_rew_")
+        return out
 
     def get_term(self, name: str) -> Any:
         """Get reward term function or instance by name.
@@ -331,3 +413,88 @@ class RewardManager:
         for name, cfg in zip(self._term_names, self._term_cfgs):
             msg += f"  - {name}: weight={cfg.weight}\n"
         return msg
+
+
+class MultiAgentRewardManager(RewardManager):
+    """Reward manager that also accumulates per-body scaled rewards for decoupled PPO.
+
+    Subclasses :class:`RewardManager` and overrides :meth:`compute` to additionally
+    fill ``self.last_multi_agent_rewards``: a dict keyed by body group
+    (``lower_body``, ``upper_body``, ...) that PPO-MA reads each step via
+    ``extras["rewards_ma"]`` to drive per-body advantage / value learning.
+
+    Each :class:`MultiAgentRewardTermCfg` term carries an ``ma_reward_group``
+    in {``lower_body``, ``upper_body``, ``shared``, ``None``}. ``None`` and
+    ``shared`` add the scaled reward to every group buffer; a specific group
+    adds only to that buffer. Plain :class:`RewardTermCfg` terms (no group
+    field) are treated as ``shared``.
+    """
+
+    def __init__(self, cfg: MultiAgentRewardManagerCfg, env: Any, device: str):
+        super().__init__(cfg, env, device)
+        self._ma_cfg = cfg
+        self._ma_bufs: dict[str, torch.Tensor] | None = None
+        self.last_multi_agent_rewards: dict[str, torch.Tensor] = {}
+        keys = cfg.multi_agent_body_keys
+        if keys:
+            self._ma_bufs = {
+                k: torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) for k in keys
+            }
+
+    def compute(self, dt: float) -> torch.Tensor:
+        self._reward_buf[:] = 0.0
+        self.last_scaled_term_rewards = {}
+        self.last_raw_term_rewards = {}
+        if self._ma_bufs is not None:
+            for b in self._ma_bufs.values():
+                b.zero_()
+
+        for term_name, term_cfg in zip(self._term_names, self._term_cfgs):
+            if term_name in self._term_instances:
+                instance = self._term_instances[term_name]
+                rew_raw = instance(self.env, **term_cfg.params)
+            else:
+                func = self._term_funcs[term_name]
+                rew_raw = func(self.env, **term_cfg.params)
+
+            if rew_raw.shape[0] != self.env.num_envs:
+                raise ValueError(
+                    f"Reward term '{term_name}' returned wrong shape. "
+                    f"Expected [{self.env.num_envs}], got {rew_raw.shape}"
+                )
+
+            rew_scaled = rew_raw * term_cfg.weight * dt
+            self.last_scaled_term_rewards[term_name] = rew_scaled.detach().clone()
+            self.last_raw_term_rewards[term_name] = rew_raw.detach().clone()
+            self._reward_buf += rew_scaled
+
+            if self._ma_bufs is not None:
+                grp = (
+                    term_cfg.ma_reward_group
+                    if isinstance(term_cfg, MultiAgentRewardTermCfg)
+                    else None
+                )
+                grp = grp or "shared"
+                if grp == "shared":
+                    for b in self._ma_bufs.values():
+                        b += rew_scaled
+                elif grp in self._ma_bufs:
+                    self._ma_bufs[grp] += rew_scaled
+                else:
+                    raise ValueError(
+                        f"Reward term '{term_name}' has ma_reward_group={grp!r} but "
+                        f"multi_agent_body_keys={self._ma_cfg.multi_agent_body_keys!r}"
+                    )
+
+            self._episode_sums[term_name] += rew_scaled
+            self._episode_sums_raw[term_name] += rew_raw
+
+        if self.cfg.only_positive_rewards:
+            self._reward_buf[:] = torch.clip(self._reward_buf, min=0.0)
+
+        if self._ma_bufs is not None:
+            self.last_multi_agent_rewards = {k: v.clone() for k, v in self._ma_bufs.items()}
+        else:
+            self.last_multi_agent_rewards = {}
+
+        return self._reward_buf

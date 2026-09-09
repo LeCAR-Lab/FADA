@@ -1,5 +1,7 @@
 import dataclasses
 
+import pytest
+
 from holosoma.config_values import experiment
 from holosoma.utils.helpers import get_class
 from holosoma.train_agent import get_tyro_env_config, training_context
@@ -7,6 +9,15 @@ from holosoma.utils.common import seeding
 from holosoma.utils.safe_torch_import import torch
 
 
+# Requires a working simulator install AND a CUDA device: it builds 16 real envs
+# (`get_class(tyro_config.env_class)`, which imports isaacgym for the default
+# simulator) and hardcodes `device="cuda"`. On a checkout that has neither it fails
+# with `ModuleNotFoundError: isaacgym` rather than being deselected.
+#
+# `isaacsim` is the marker used here even though the default simulator this test
+# reaches is IsaacGym, because it is the repo's one "needs a simulator installation"
+# deselector: the suite is run as `-m "not isaacsim"` on a machine without one.
+@pytest.mark.isaacsim
 def test_e2e_step():
     seeding(0)
     num_envs = 16

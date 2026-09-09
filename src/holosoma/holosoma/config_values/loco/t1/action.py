@@ -13,4 +13,16 @@ t1_29dof_joint_pos = ActionManagerCfg(
     }
 )
 
+t1_23dof_joint_pos = ActionManagerCfg(
+    terms={
+        "joint_control": ActionTermCfg(
+            func="holosoma.managers.action.terms.joint_control:JointPositionActionTerm",
+            params={},
+            scale=1.0,
+            clip=None,
+        ),
+    }
+)
+
 __all__ = ["t1_29dof_joint_pos"]
+__all__ += ["t1_23dof_joint_pos"]

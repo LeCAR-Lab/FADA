@@ -3,8 +3,10 @@
 from abc import ABC, abstractmethod
 
 import numpy as np
+from loguru import logger
 
 from holosoma_inference.config.config_types import RobotConfig
+from holosoma_inference.config.config_types.task import TaskConfig
 
 
 class BaseInterface(ABC):
@@ -12,15 +14,49 @@ class BaseInterface(ABC):
     Abstract base class for robot control interfaces.
     """
 
-    def __init__(self, robot_config: RobotConfig, domain_id=0, interface_str=None, use_joystick=True):
+    def __init__(
+        self,
+        robot_config: RobotConfig,
+        domain_id=0,
+        interface_str=None,
+        use_joystick=True,
+        task_config: TaskConfig | None = None,
+    ):
         self.robot_config = robot_config
         self.domain_id = domain_id
         self.interface_str = interface_str
         self.use_joystick = use_joystick
+        self.task_config = task_config
+        self.vel_state_processor = None
+        self._init_vel_state_processor()
         # Initialize key state tracking for joystick
         self._key_states: dict[str, bool] = {}
         self._last_key_states: dict[str, bool] = {}
         self._wc_key_map = self._default_wc_key_map()
+
+    def _init_vel_state_processor(self) -> None:
+        """Optional ZMQ / truth velocity (mocap) pipeline."""
+        if self.task_config is None:
+            return
+        try:
+            from holosoma_inference.sdk.vel_state_processor import create_vel_state_processor
+
+            self.vel_state_processor = create_vel_state_processor(self.task_config)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Failed to initialize velocity state processor: {exc}")
+            self.vel_state_processor = None
+
+    def get_vel_state(self):
+        """Ground-truth base linear/angular velocity if vel_state_processor is active."""
+        if getattr(self, "vel_state_processor", None) is None:
+            return None
+        return self.vel_state_processor.get_vel_state()
+
+    def get_pose_state(self):
+        """Ground-truth base pose if vel_state_processor is active."""
+        if getattr(self, "vel_state_processor", None) is None:
+            return None
+        return self.vel_state_processor.get_pose_state()
 
     @abstractmethod
     def get_low_state(self) -> np.ndarray:

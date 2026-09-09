@@ -44,6 +44,9 @@ class ObsGroupCfg:
     history_length: int = 1
     """Number of timesteps to retain for history stacking (``1`` disables history)."""
 
+    past_history: bool = False
+    """If ``True``, use past history of the observation alone, not the current observation"""
+
 
 @dataclass(frozen=True)
 class ObservationManagerCfg:

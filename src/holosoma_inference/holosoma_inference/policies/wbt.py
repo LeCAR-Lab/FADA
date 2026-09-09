@@ -52,8 +52,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
         self.motion_yaw_offset = 0.0
+        self.per_joint_policy_action_scale: np.ndarray | None = None
 
         super().__init__(config)
+        self._configure_action_scales()
 
         # Load stiff startup parameters from robot config
         if config.robot.stiff_startup_pos is not None:
@@ -85,7 +87,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 )
             )
 
-        if sys.stdin.isatty():
+        if hasattr(self, "_shared_hardware_source"):
+            logger.info(colored("Skipping stiff hold prompt (secondary policy)", "yellow"))
+        elif sys.stdin.isatty():
             logger.info(colored("\n⚠️  Ready to enter stiff hold mode", "yellow", attrs=["bold"]))
             logger.info(colored("Press Enter to continue...", "yellow"))
             try:
@@ -120,7 +124,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return xyzw_to_wxyz(ref_ori_xyzw)
 
     def setup_policy(self, model_path):
-        self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
+        self.onnx_policy_session = self._create_onnx_session(model_path)
+        self._write_model_loaded_signal()
         self.onnx_input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
         self.onnx_output_names = [out.name for out in self.onnx_policy_session.get_outputs()]
 
@@ -175,6 +180,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
             {
                 "motion_command_0": self.motion_command_0.copy(),
                 "ref_quat_xyzw_0": self.ref_quat_xyzw_0.copy(),
+                "per_joint_policy_action_scale": self.per_joint_policy_action_scale.copy()
+                if self.per_joint_policy_action_scale is not None
+                else None,
             }
         )
         return state
@@ -183,10 +191,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
         super()._restore_policy_state(state)
         self.motion_command_0 = state["motion_command_0"].copy()
         self.ref_quat_xyzw_0 = state["ref_quat_xyzw_0"].copy()
+        saved = state["per_joint_policy_action_scale"]
+        self.per_joint_policy_action_scale = saved.copy() if saved is not None else None
         self.motion_clip_progressing = False
         self.timestep_util.reset(start_timestep=0)
         self.curr_motion_timestep = self.timestep_util.timestep
         self.robot_yaw_offset = 0.0
+        self.motion_yaw_offset = 0.0
 
     def _on_policy_switched(self, model_path: str):
         super()._on_policy_switched(model_path)
@@ -197,6 +208,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.curr_motion_timestep = self.timestep_util.timestep
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
+        self.motion_yaw_offset = 0.0
+        self._configure_action_scales()
 
     def get_init_target(self, robot_state_data):
         """Get initialization target joint positions."""
@@ -262,11 +275,73 @@ class WholeBodyTrackingPolicy(BasePolicy):
         # store last policy action
         self.last_policy_action = policy_action.copy()
         # scale policy action
-        self.scaled_policy_action = policy_action * self.policy_action_scale
+        if self.per_joint_policy_action_scale is None:
+            self.scaled_policy_action = policy_action * self.policy_action_scale
+        else:
+            self.scaled_policy_action = policy_action * self.per_joint_policy_action_scale
         # update motion timestep
         self._set_motion_timestep()
 
         return self.scaled_policy_action
+
+    def _configure_action_scales(self) -> None:
+        """Configure action scales, prioritising ONNX metadata over config fallbacks.
+
+        Resolution order:
+        1. ONNX metadata ``action_scale`` (scalar or per-joint list)
+        2. ``robot.default_per_joint_action_scale`` when
+           ``task.action_scales_by_effort_limit_over_p_gain`` is True
+        3. Fall back to the scalar ``task.policy_action_scale``
+        """
+        raw_metadata = dict(self.onnx_policy_session.get_modelmeta().custom_metadata_map)
+        onnx_action_scale = self._parse_action_scale_metadata(raw_metadata.get("action_scale"))
+
+        if onnx_action_scale is not None:
+            scales = onnx_action_scale.astype(np.float32, copy=False).reshape(-1)
+        elif self.config.task.action_scales_by_effort_limit_over_p_gain:
+            fallback = self.config.robot.default_per_joint_action_scale
+            if fallback is None:
+                raise ValueError(
+                    "task.action_scales_by_effort_limit_over_p_gain=True requires ONNX metadata key "
+                    "'action_scale' (scalar or per-joint list) or "
+                    "robot.default_per_joint_action_scale."
+                )
+            scales = np.asarray(fallback, dtype=np.float32).reshape(-1)
+            logger.warning("ONNX metadata 'action_scale' missing; using robot.default_per_joint_action_scale.")
+        else:
+            self.per_joint_policy_action_scale = None
+            return
+
+        if scales.size == 1:
+            scales = np.full(self.num_dofs, scales.item(), dtype=np.float32)
+        elif scales.size != self.num_dofs:
+            raise ValueError(f"Action scale must contain 1 or {self.num_dofs} values, got {scales.size}.")
+
+        self.per_joint_policy_action_scale = scales.reshape(1, -1)
+
+    @staticmethod
+    def _parse_action_scale_metadata(raw_value: str | None) -> np.ndarray | None:
+        """Parse action_scale metadata from JSON-serialized or CSV string formats."""
+        if raw_value is None:
+            return None
+
+        try:
+            parsed = json.loads(raw_value)
+        except json.JSONDecodeError:
+            parsed = raw_value
+
+        if isinstance(parsed, (int, float)):
+            return np.array([float(parsed)], dtype=np.float32)
+        if isinstance(parsed, str):
+            values = [float(token.strip()) for token in parsed.split(",") if token.strip()]
+            if not values:
+                raise ValueError("ONNX metadata action_scale is an empty string.")
+            return np.array(values, dtype=np.float32)
+
+        values = np.asarray(parsed, dtype=np.float32).reshape(-1)
+        if values.size == 0:
+            raise ValueError("ONNX metadata action_scale is empty.")
+        return values
 
     def _get_manual_command(self, robot_state_data):
         # TODO: instead of adding kp/kd_override in def _set_motor_command,
@@ -318,6 +393,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
         self.motion_command_t = self.motion_command_0.copy()
         self.robot_yaw_offset = 0.0
+        self.motion_yaw_offset = 0.0
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""

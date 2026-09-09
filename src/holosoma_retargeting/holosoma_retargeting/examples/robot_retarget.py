@@ -21,6 +21,7 @@ src_root = Path(__file__).resolve().parents[2]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
+from holosoma_retargeting.asset_paths import require_asset_dir, require_asset_file  # noqa: E402
 from holosoma_retargeting.config_types.data_type import DEMO_JOINTS_REGISTRY, MotionDataConfig  # noqa: E402
 from holosoma_retargeting.config_types.retargeter import RetargeterConfig  # noqa: E402
 from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # noqa: E402
@@ -612,6 +613,9 @@ def main(cfg: RetargetingConfig) -> None:
     data_format: str = cfg.data_format or DEFAULT_DATA_FORMATS[task_type]
     save_dir = cfg.save_dir if cfg.save_dir is not None else Path(DEFAULT_SAVE_DIRS[task_type].format(robot=robot))
     data_path = cfg.data_path
+    # `--data_path` defaults to `demo_data/OMOMO_new`, which is checkout-relative: the
+    # retargeting assets are not in the wheel. See holosoma_retargeting/asset_paths.py.
+    require_asset_dir(data_path, what="--data_path")
 
     os.makedirs(save_dir, exist_ok=True)
     logger.info("Task: %s, Type: %s, Format: %s", task_name, task_type, data_format)
@@ -620,6 +624,14 @@ def main(cfg: RetargetingConfig) -> None:
     # Ensure configs match top-level selections
     if cfg.robot_config.robot_type != robot:
         cfg.robot_config = RobotConfig(robot_type=robot)
+
+    # The URDF comes from `models/`, a different asset tree from `--data_path`'s
+    # `demo_data/`. Checking the data path says nothing about it: `--data_path` may
+    # legitimately point at a user's own motion capture outside the package, in which
+    # case that check passes on a wheel install that has no `models/` tree at all, and
+    # the run dies much later inside a URDF loader. Check it here, where the robot
+    # config is final. See holosoma_retargeting/asset_paths.py.
+    require_asset_file(cfg.robot_config.ROBOT_URDF_FILE, what="robot URDF (--robot-config.robot-urdf-file)")
 
     if cfg.motion_data_config.robot_type != robot or cfg.motion_data_config.data_format != data_format:
         cfg.motion_data_config = MotionDataConfig(data_format=data_format, robot_type=robot)

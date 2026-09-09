@@ -73,6 +73,20 @@ mjwarp = dataclasses.replace(
     ),
 )
 
+# FADA: publish ground-truth pose over ZMQ for external velocity estimators.
+isaacgym = dataclasses.replace(
+    isaacgym, config=dataclasses.replace(isaacgym.config, bridge=dataclasses.replace(isaacgym.config.bridge, publish_truth_pose=True))
+)
+isaacsim = dataclasses.replace(
+    isaacsim, config=dataclasses.replace(isaacsim.config, bridge=dataclasses.replace(isaacsim.config.bridge, publish_truth_pose=True))
+)
+mujoco = dataclasses.replace(
+    mujoco, config=dataclasses.replace(mujoco.config, bridge=dataclasses.replace(mujoco.config.bridge, publish_truth_pose=True))
+)
+mjwarp = dataclasses.replace(
+    mjwarp, config=dataclasses.replace(mjwarp.config, bridge=dataclasses.replace(mjwarp.config.bridge, publish_truth_pose=True))
+)
+
 DEFAULTS = {
     "isaacgym": isaacgym,
     "isaacsim": isaacsim,

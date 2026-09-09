@@ -18,6 +18,11 @@ def interquartile_mean(x, dim=-1):
     sorted_x, _ = torch.sort(x, dim=dim)
     n = sorted_x.shape[dim]
 
+    # FADA: for n < 4 (too few samples to form a meaningful IQR - e.g. 1x1 raycast grid
+    # when horizontal_scale is too coarse) fall back to the plain mean instead of NaN.
+    if n < 4:
+        return torch.mean(sorted_x, dim=dim)
+
     # Calculate quartile indices
     q1_idx = max(1, n // 4)  # 25th percentile index
     q3_idx = min(n - 1, 3 * n // 4)  # 75th percentile index
@@ -32,6 +37,19 @@ def interquartile_mean(x, dim=-1):
         iqr_values = sorted_x[tuple(indices)]
 
     return torch.mean(iqr_values, dim=dim)
+
+
+def _select_deterministic_eval_origin(origin_grid: Any, device: Any = None) -> torch.Tensor:
+    """Pick the center-most terrain tile for deterministic evaluation."""
+    origin_grid_tensor = torch.as_tensor(origin_grid, device=device, dtype=torch.float32)
+    if origin_grid_tensor.dim() != 3 or origin_grid_tensor.shape[-1] != 3:
+        raise ValueError(
+            f"Expected terrain origin grid shape [rows, cols, 3], got {tuple(origin_grid_tensor.shape)}"
+        )
+
+    center_row = (origin_grid_tensor.shape[0] - 1) // 2
+    center_col = (origin_grid_tensor.shape[1] - 1) // 2
+    return origin_grid_tensor[center_row, center_col]
 
 
 class TerrainLocomotion(TerrainTermBase):
@@ -119,9 +137,9 @@ class TerrainLocomotion(TerrainTermBase):
             # Training mode: random terrain tiles for curriculum learning
             self._env_origins[:] = torch.from_numpy(self.terrain.sample_env_origins()).to(self.device).to(torch.float)
         else:
-            # Eval mode: all robots at tile (0,0) for deterministic evaluation
-            origin_0_0 = torch.from_numpy(self.terrain._env_origins[0, 0]).to(self.device).to(torch.float)
-            self._env_origins[:] = origin_0_0  # Broadcast to all robots
+            # Eval mode: keep all robots on the same center tile for deterministic evaluation.
+            eval_origin = _select_deterministic_eval_origin(self.terrain._env_origins, device=self.device)
+            self._env_origins[:] = eval_origin  # Broadcast to all robots
 
     def _init_base_height_points(self):
         """Returns points at which the height measurments are sampled (in base frame)

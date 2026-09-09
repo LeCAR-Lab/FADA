@@ -40,6 +40,7 @@ from holosoma.utils.safe_torch_import import (
     optim,
     torch,
 )
+from holosoma.utils.safe_torch_load import load_checkpoint as safe_load_checkpoint
 
 torch.set_float32_matmul_precision("high")
 
@@ -624,7 +625,7 @@ class FastSACAgent(BaseAlgo):
         if not ckpt_path:
             return
         # Load checkpoint if specified
-        torch_checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        torch_checkpoint = safe_load_checkpoint(ckpt_path, map_location=self.device)
 
         # Handle DDP-wrapped models
         actor_state_dict = torch_checkpoint["actor_state_dict"]
@@ -972,6 +973,11 @@ class FastSACAgent(BaseAlgo):
         # Extract control gains and velocity limits & attach to onnx as metadata
         kp_list, kd_list = get_control_gains_from_config(self.env.robot_config)
         cmd_ranges = get_command_ranges_from_env(self.unwrapped_env)
+        action_scales = getattr(self.unwrapped_env, "action_scales", None)
+        if action_scales is None:
+            action_scale_metadata: float | list[float] = float(self.env.robot_config.control.action_scale)
+        else:
+            action_scale_metadata = action_scales.detach().cpu().tolist()
         # Extract URDF text from the robot config
         urdf_file_path, urdf_str = get_urdf_text_from_robot_config(self.env.robot_config)
 
@@ -979,6 +985,7 @@ class FastSACAgent(BaseAlgo):
             "dof_names": self.env.robot_config.dof_names,
             "kp": kp_list,
             "kd": kd_list,
+            "action_scale": action_scale_metadata,
             "command_ranges": cmd_ranges,
             "robot_urdf": urdf_str,
             "robot_urdf_path": urdf_file_path,

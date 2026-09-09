@@ -28,6 +28,8 @@ class BoosterCommandSender(BasicCommandSender):
             self.client = B1LocoClient()
             self.lowcmd_publisher_.InitChannel()
             self.client.Init()
+            self._sdk2py_low_cmd_sequence = 0
+            self._last_sync_low_cmd_payload = None
             self.init_booster_low_cmd()
             self.create_prepare_cmd(self.low_cmd, self.config)
             self._send_cmd(self.low_cmd)
@@ -47,6 +49,45 @@ class BoosterCommandSender(BasicCommandSender):
             self.low_cmd.cmd_type = self.LowCmdType.PARALLEL
         self.motor_cmds = [self.MotorCmd() for _ in range(self.config.num_motors)]
         self.low_cmd.motor_cmd = self.motor_cmds
+
+    def _stamp_low_cmd_sequence(self, low_cmd):
+        """Stamp a small sequence number into Booster lowcmd for sim-side sync ack.
+
+        Booster LowCmd has no reserve/user-data field like Unitree. In custom
+        mode, MotorCmd.weight is not used by the current controller or sim
+        bridge torque path, so motor 0 carries the same 1..255 sequence that
+        Unitree stores in reserve[0].
+        """
+        motor_cmd = getattr(low_cmd, "motor_cmd", None)
+        if motor_cmd is None or len(motor_cmd) == 0:
+            return
+        self._sdk2py_low_cmd_sequence = (int(self._sdk2py_low_cmd_sequence) % 255) + 1
+        motor_cmd[0].weight = float(self._sdk2py_low_cmd_sequence)
+
+    def _snapshot_low_cmd_payload(self, low_cmd):
+        """Capture the command scalars needed by lock-step sim before SDK handoff."""
+        motor_cmd = getattr(low_cmd, "motor_cmd", None)
+        if motor_cmd is None:
+            self._last_sync_low_cmd_payload = None
+            return
+        self._last_sync_low_cmd_payload = {
+            "low_cmd_kind": "booster",
+            "low_cmd_seq": int(self._sdk2py_low_cmd_sequence),
+            "low_cmd": [
+                [
+                    float(m.tau),
+                    float(m.kp),
+                    float(m.kd),
+                    float(m.q),
+                    float(m.dq),
+                ]
+                for m in motor_cmd
+            ],
+        }
+
+    def get_sync_low_cmd_payload(self):
+        """Return the most recent lowcmd snapshot for ZMQ sync stepping."""
+        return self._last_sync_low_cmd_payload
 
     def send_command(self, cmd_q, cmd_dq, cmd_tau, dof_pos_latest=None, kp_override=None, kd_override=None):
         """Send command to Booster robot."""
@@ -71,10 +112,14 @@ class BoosterCommandSender(BasicCommandSender):
         )
 
         # Send command
+        self._stamp_low_cmd_sequence(self.low_cmd)
+        self._snapshot_low_cmd_payload(self.low_cmd)
         self.lowcmd_publisher_.Write(self.low_cmd)
 
     def _send_cmd(self, cmd):
         """Send command to robot."""
+        self._stamp_low_cmd_sequence(cmd)
+        self._snapshot_low_cmd_payload(cmd)
         self.lowcmd_publisher_.Write(cmd)
 
     def init_cmd_t1(self, low_cmd):

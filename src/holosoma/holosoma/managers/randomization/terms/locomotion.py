@@ -52,6 +52,87 @@ def _get_joint_action_term(env: Any) -> JointPositionActionTerm | None:
     return None
 
 
+def _infer_num_bodies(env: Any) -> int:
+    """Best-effort body-count inference for oracle randomization buffers."""
+    num_bodies = getattr(env, "num_bodies", None)
+    if isinstance(num_bodies, int) and num_bodies >= 0:
+        return num_bodies
+
+    simulator = getattr(env, "simulator", None)
+    body_list = getattr(simulator, "_body_list", None)
+    if body_list is not None:
+        return len(body_list)
+
+    body_names = getattr(simulator, "body_names", None)
+    if body_names is not None:
+        return len(body_names)
+
+    return 0
+
+
+def _ensure_oracle_randomization_buffers(env: Any) -> None:
+    """Create oracle randomization caches with stable shapes."""
+    num_envs = int(env.num_envs)
+    num_bodies = _infer_num_bodies(env)
+    device = env.device
+
+    if (
+        not hasattr(env, "oracle_body_mass")
+        or env.oracle_body_mass.shape[0] != num_envs
+        or env.oracle_body_mass.shape[1] != num_bodies
+    ):
+        env.oracle_body_mass = torch.zeros(num_envs, num_bodies, dtype=torch.float32, device=device)
+
+    if (
+        not hasattr(env, "oracle_nominal_body_mass")
+        or env.oracle_nominal_body_mass.shape[0] != num_envs
+        or env.oracle_nominal_body_mass.shape[1] != num_bodies
+    ):
+        env.oracle_nominal_body_mass = torch.zeros(num_envs, num_bodies, dtype=torch.float32, device=device)
+
+    if (
+        not hasattr(env, "oracle_link_mass_scale")
+        or env.oracle_link_mass_scale.shape[0] != num_envs
+        or env.oracle_link_mass_scale.shape[1] != num_bodies
+    ):
+        env.oracle_link_mass_scale = torch.ones(num_envs, num_bodies, dtype=torch.float32, device=device)
+
+    if not hasattr(env, "oracle_base_mass_delta") or env.oracle_base_mass_delta.shape != (num_envs, 1):
+        env.oracle_base_mass_delta = torch.zeros(num_envs, 1, dtype=torch.float32, device=device)
+
+    if not hasattr(env, "oracle_friction_coeff") or env.oracle_friction_coeff.shape != (num_envs, 1):
+        env.oracle_friction_coeff = torch.ones(num_envs, 1, dtype=torch.float32, device=device)
+
+    if not hasattr(env, "oracle_base_com_bias") or env.oracle_base_com_bias.shape != (num_envs, 3):
+        env.oracle_base_com_bias = torch.zeros(num_envs, 3, dtype=torch.float32, device=device)
+
+
+def _as_sequence(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            stripped = stripped[1:-1]
+        return [part.strip().strip("'\"") for part in stripped.split(",") if part.strip()]
+    if isinstance(value, Sequence):
+        return list(value)
+    return [value]
+
+
+def _resolve_fixed_payloads(body_names: Any, added_masses: Any) -> dict[str, float]:
+    names = [str(name) for name in _as_sequence(body_names)]
+    masses = [float(mass) for mass in _as_sequence(added_masses)]
+    if not names and not masses:
+        return {}
+    if len(names) != len(masses):
+        raise ValueError(
+            "fixed_payload_body_names and fixed_payload_added_masses must have the same length; "
+            f"got {len(names)} names and {len(masses)} masses."
+        )
+    return dict(zip(names, masses, strict=True))
+
+
 def _isaacsim_randomize_rigid_body_mass(
     simulator: IsaacSim,
     env_ids_cpu: torch.Tensor,
@@ -124,6 +205,112 @@ def _isaacsim_randomize_rigid_body_material(
         restitution_range=restitution_range,
         num_buckets=num_buckets,
     )
+
+
+def _get_isaacsim_root_physx_view(simulator: Any) -> Any | None:
+    robot = getattr(simulator, "_robot", None)
+    if robot is None:
+        return None
+    return getattr(robot, "root_physx_view", None)
+
+
+def _read_isaacsim_body_masses(simulator: Any) -> torch.Tensor | None:
+    """Read per-env per-body masses from IsaacSim root PhysX view."""
+    root_physx_view = _get_isaacsim_root_physx_view(simulator)
+    get_masses = getattr(root_physx_view, "get_masses", None) if root_physx_view is not None else None
+    if not callable(get_masses):
+        return None
+
+    masses = get_masses()
+    if masses is None:
+        return None
+
+    masses_tensor = torch.as_tensor(masses, dtype=torch.float32)
+    if masses_tensor.ndim == 1:
+        masses_tensor = masses_tensor.unsqueeze(0)
+    elif masses_tensor.ndim == 3 and masses_tensor.shape[-1] == 1:
+        masses_tensor = masses_tensor.squeeze(-1)
+    elif masses_tensor.ndim > 2:
+        masses_tensor = masses_tensor.reshape(masses_tensor.shape[0], -1)
+    return masses_tensor
+
+
+def _read_isaacsim_static_friction(simulator: Any) -> torch.Tensor | None:
+    """Read average static friction per env from IsaacSim root PhysX view."""
+    root_physx_view = _get_isaacsim_root_physx_view(simulator)
+    get_material_properties = (
+        getattr(root_physx_view, "get_material_properties", None) if root_physx_view is not None else None
+    )
+    if not callable(get_material_properties):
+        return None
+
+    material_properties = get_material_properties()
+    if material_properties is None:
+        return None
+
+    material_tensor = torch.as_tensor(material_properties, dtype=torch.float32)
+    if material_tensor.ndim == 3 and material_tensor.shape[-1] >= 1:
+        static_friction = material_tensor[..., 0]
+    elif material_tensor.ndim == 2 and material_tensor.shape[1] >= 1:
+        static_friction = material_tensor
+    else:
+        return None
+
+    if static_friction.ndim == 1:
+        return static_friction.unsqueeze(1)
+    return static_friction.reshape(static_friction.shape[0], -1).mean(dim=1, keepdim=True)
+
+
+def _write_isaacsim_mass_oracle_cache(
+    env: Any,
+    idx: torch.Tensor,
+    *,
+    nominal_masses: torch.Tensor | None,
+    randomized_masses: torch.Tensor | None,
+) -> None:
+    """Write mass-related oracle caches from IsaacSim mass tensors."""
+    if nominal_masses is None or randomized_masses is None:
+        logger.warning("IsaacSim mass oracle write-back skipped because masses could not be queried from PhysX.")
+        return
+
+    idx_nominal = idx.to(device=nominal_masses.device, dtype=torch.long)
+    idx_randomized = idx.to(device=randomized_masses.device, dtype=torch.long)
+    if idx_nominal.numel() == 0 or idx_randomized.numel() == 0:
+        return
+
+    if nominal_masses.shape[0] <= int(idx_nominal.max().item()) or randomized_masses.shape[0] <= int(
+        idx_randomized.max().item()
+    ):
+        logger.warning("IsaacSim mass oracle write-back skipped due to unexpected mass tensor shape.")
+        return
+
+    nominal_selected = nominal_masses[idx_nominal].to(device=env.device, dtype=torch.float32)
+    randomized_selected = randomized_masses[idx_randomized].to(device=env.device, dtype=torch.float32)
+
+    num_bodies = min(env.oracle_body_mass.shape[1], nominal_selected.shape[1], randomized_selected.shape[1])
+    if num_bodies <= 0:
+        return
+
+    env.oracle_nominal_body_mass[idx, :num_bodies] = nominal_selected[:, :num_bodies]
+    env.oracle_body_mass[idx, :num_bodies] = randomized_selected[:, :num_bodies]
+
+    body_names = list(getattr(env, "body_names", []) or [])
+    body_index_map = {str(name): i for i, name in enumerate(body_names)}
+
+    link_names = list(getattr(env.robot_config, "randomize_link_body_names", []) or [])
+    for body_name in link_names:
+        body_idx = body_index_map.get(body_name)
+        if body_idx is None or body_idx >= num_bodies:
+            continue
+        nominal = nominal_selected[:, body_idx]
+        randomized = randomized_selected[:, body_idx]
+        scale = torch.where(torch.abs(nominal) > 1e-6, randomized / nominal, torch.ones_like(randomized))
+        env.oracle_link_mass_scale[idx, body_idx] = scale
+
+    torso_name = str(getattr(env.robot_config, "torso_name", "") or "")
+    torso_idx = body_index_map.get(torso_name)
+    if torso_idx is not None and torso_idx < num_bodies:
+        env.oracle_base_mass_delta[idx, 0] = randomized_selected[:, torso_idx] - nominal_selected[:, torso_idx]
 
 
 class PushRandomizerState(RandomizationTermBase):
@@ -594,6 +781,8 @@ def randomize_base_com_startup(
     """
     env._randomize_base_com = bool(enabled)
     env._base_com_range = base_com_range
+    _ensure_oracle_randomization_buffers(env)
+    env.oracle_base_com_bias[:] = 0.0
     if not enabled:
         return
 
@@ -609,6 +798,7 @@ def randomize_base_com_startup(
     idx = _ensure_env_ids_tensor(env, env_ids)
     if idx.numel() == 0:
         return
+    env.oracle_base_com_bias[idx] = 0.0
 
     if hasattr(simulator, "gym"):
         gym = simulator.gym
@@ -640,6 +830,7 @@ def randomize_base_com_startup(
                 device=env.device,
             )
             simulator._base_com_bias[env_id] = bias
+            env.oracle_base_com_bias[env_id] = bias
             body_props[body_index].com.x += bias[0].item()
             body_props[body_index].com.y += bias[1].item()
             body_props[body_index].com.z += bias[2].item()
@@ -677,6 +868,14 @@ def randomize_base_com_startup(
             distribution="uniform",
             num_envs=simulator.training_config.num_envs,
         )
+        base_com_bias = getattr(simulator, "base_com_bias", None)
+        if base_com_bias is None:
+            base_com_bias = getattr(simulator, "_base_com_bias", None)
+        if isinstance(base_com_bias, torch.Tensor):
+            idx_bias = idx.to(device=base_com_bias.device, dtype=torch.long)
+            env.oracle_base_com_bias[idx] = base_com_bias[idx_bias].to(device=env.device, dtype=torch.float32)
+        else:
+            logger.warning("IsaacSim base COM oracle write-back skipped because base_com_bias buffer was not found.")
     elif simulator.simulator_config.mujoco_backend == MujocoBackend.WARP:
         from holosoma.simulator.mujoco.backends.warp_randomization import randomize_field
 
@@ -711,6 +910,9 @@ def randomize_mass_startup(
     link_mass_range: Sequence[float] = (1.0, 1.0),
     enable_base_mass: bool = True,
     added_mass_range: Sequence[float] = (0.0, 0.0),
+    fixed_payload_body_names: Sequence[str] | str | None = None,
+    fixed_payload_added_masses: Sequence[float] | str | None = None,
+    replace_fixed_payload_dr: bool = True,
     enabled: bool = True,
     **_,
 ) -> None:
@@ -719,27 +921,68 @@ def randomize_mass_startup(
     Note: link_mass_range uses SCALING (e.g., 0.9-1.2 = 90-120% of original),
           added_mass_range uses ADDITION (e.g., -1.0 to 3.0 kg offset).
     """
-    if not enabled:
-        return
-
-    logger.info(
-        f"[Randomization] Mass: "
-        f"link_mass={link_mass_range} (operation=scale, enabled={enable_link_mass}), "
-        f"base_mass={added_mass_range} (operation=add, enabled={enable_base_mass})"
+    _ensure_oracle_randomization_buffers(env)
+    fixed_payloads = _resolve_fixed_payloads(fixed_payload_body_names, fixed_payload_added_masses)
+    fixed_payload_names = set(fixed_payloads)
+    replace_fixed_payload_dr = bool(replace_fixed_payload_dr)
+    torso_name_for_flags = str(getattr(env.robot_config, "torso_name", "") or "")
+    link_names_for_flags = list(getattr(env.robot_config, "randomize_link_body_names", []) or [])
+    if replace_fixed_payload_dr:
+        link_names_for_flags = [name for name in link_names_for_flags if name not in fixed_payload_names]
+    effective_link_mass = bool(enable_link_mass and link_names_for_flags)
+    effective_base_mass = bool(
+        enable_base_mass and not (replace_fixed_payload_dr and torso_name_for_flags in fixed_payload_names)
     )
+
+    env.oracle_link_mass_scale[:] = 1.0
+    env.oracle_base_mass_delta[:] = 0.0
+    env.oracle_body_mass[:] = 0.0
+    env.oracle_nominal_body_mass[:] = 0.0
+
+    env._randomize_link_mass = bool(enabled and effective_link_mass)
+    env._randomize_base_mass = bool(enabled and effective_base_mass)
 
     simulator = env.simulator
     idx = _ensure_env_ids_tensor(env, env_ids)
     if idx.numel() == 0:
         return
 
-    env._randomize_link_mass = bool(enable_link_mass)
-    env._randomize_base_mass = bool(enable_base_mass)
+    if not enabled:
+        if hasattr(simulator, "gym"):
+            gym = simulator.gym
+            for env_id in idx.tolist():
+                env_ptr = simulator.envs[env_id]
+                actor = simulator.robot_handles[env_id]
+                body_props = gym.get_actor_rigid_body_properties(env_ptr, actor)
+                masses = np.asarray([float(prop.mass) for prop in body_props], dtype=np.float32)
+                env.oracle_body_mass[env_id, : masses.shape[0]] = torch.from_numpy(masses).to(device=env.device)
+                env.oracle_nominal_body_mass[env_id, : masses.shape[0]] = torch.from_numpy(masses).to(
+                    device=env.device
+                )
+        elif simulator.__class__.__name__ == "IsaacSim":
+            masses = _read_isaacsim_body_masses(simulator)
+            _write_isaacsim_mass_oracle_cache(env, idx, nominal_masses=masses, randomized_masses=masses)
+        return
+
+    logger.info(
+        f"[Randomization] Mass: "
+        f"link_mass={link_mass_range} (operation=scale, enabled={enable_link_mass}), "
+        f"base_mass={added_mass_range} (operation=add, enabled={enable_base_mass}), "
+        f"fixed_payloads={fixed_payloads} (replace_dr={replace_fixed_payload_dr})"
+    )
+
+    nominal_masses_isaacsim = None
+    if simulator.__class__.__name__ == "IsaacSim":
+        nominal_masses_isaacsim = _read_isaacsim_body_masses(simulator)
 
     if hasattr(simulator, "gym"):
         gym = simulator.gym
         body_names = list(env.robot_config.randomize_link_body_names or [])
         torso_name = env.robot_config.torso_name
+        if replace_fixed_payload_dr:
+            body_names = [name for name in body_names if name not in fixed_payload_names]
+        apply_base_mass = bool(enable_base_mass and not (replace_fixed_payload_dr and torso_name in fixed_payload_names))
+        body_index_map = {name: i for i, name in enumerate(simulator._body_list)}
         if idx.numel() > 0:
             sample_env = idx[0].item()
             sample_env_ptr = simulator.envs[sample_env]
@@ -747,34 +990,59 @@ def randomize_mass_startup(
             sample_props = gym.get_actor_rigid_body_properties(sample_env_ptr, sample_actor)
             if enable_link_mass and body_names:
                 link_masses = [
-                    float(sample_props[simulator._body_list.index(name)].mass)
+                    float(sample_props[body_index_map[name]].mass)
                     for name in body_names
-                    if name in simulator._body_list
+                    if name in body_index_map
                 ]
                 if link_masses:
                     logger.debug(
                         "[randomize_mass_startup][IsaacGym] default link mass range: "
                         f"min={min(link_masses):.6f}, max={max(link_masses):.6f}"
                     )
-            if enable_base_mass and torso_name in simulator._body_list:
-                base_mass = float(sample_props[simulator._body_list.index(torso_name)].mass)
+            if apply_base_mass and torso_name in body_index_map:
+                base_mass = float(sample_props[body_index_map[torso_name]].mass)
                 logger.debug(f"[randomize_mass_startup][IsaacGym] default torso mass: {base_mass:.6f}")
         for env_id in idx.tolist():
             env_ptr = simulator.envs[env_id]
             actor = simulator.robot_handles[env_id]
             body_props = gym.get_actor_rigid_body_properties(env_ptr, actor)
+            nominal_masses = np.asarray([float(prop.mass) for prop in body_props], dtype=np.float32)
+            link_mass_scales = np.ones(len(body_props), dtype=np.float32)
             if enable_link_mass and body_names:
                 for body_name in body_names:
-                    if body_name not in simulator._body_list:
+                    if body_name not in body_index_map:
                         continue
-                    body_index = simulator._body_list.index(body_name)
+                    body_index = body_index_map[body_name]
                     scale = np.random.uniform(link_mass_range[0], link_mass_range[1])
                     body_props[body_index].mass *= scale  # Scale operation: multiply by factor
-            if enable_base_mass and torso_name in simulator._body_list:
-                base_index = simulator._body_list.index(torso_name)
+                    link_mass_scales[body_index] = float(scale)
+
+            base_mass_delta = 0.0
+            if apply_base_mass and torso_name in body_index_map:
+                base_index = body_index_map[torso_name]
                 delta = np.random.uniform(added_mass_range[0], added_mass_range[1])
                 body_props[base_index].mass += delta  # Add operation: offset by delta
+                base_mass_delta = float(delta)
+            for body_name, added_mass in fixed_payloads.items():
+                body_index = body_index_map.get(body_name)
+                if body_index is None:
+                    raise RuntimeError(f"Body '{body_name}' not found when applying fixed payload mass.")
+                body_props[body_index].mass += float(added_mass)
+                if body_name == torso_name:
+                    base_mass_delta += float(added_mass)
             gym.set_actor_rigid_body_properties(env_ptr, actor, body_props, recomputeInertia=True)
+
+            randomized_masses = np.asarray([float(prop.mass) for prop in body_props], dtype=np.float32)
+            env.oracle_nominal_body_mass[env_id, : nominal_masses.shape[0]] = torch.from_numpy(nominal_masses).to(
+                device=env.device
+            )
+            env.oracle_body_mass[env_id, : randomized_masses.shape[0]] = torch.from_numpy(randomized_masses).to(
+                device=env.device
+            )
+            env.oracle_link_mass_scale[env_id, : link_mass_scales.shape[0]] = torch.from_numpy(link_mass_scales).to(
+                device=env.device
+            )
+            env.oracle_base_mass_delta[env_id, 0] = base_mass_delta
     elif simulator.__class__.__name__ == "IsaacSim":
         try:
             from isaaclab.managers import SceneEntityCfg
@@ -785,18 +1053,26 @@ def randomize_mass_startup(
         if env_ids_cpu.numel() == 0:
             return
 
-        if enable_link_mass:
-            asset_cfg = SceneEntityCfg("robot", body_names=env.robot_config.randomize_link_body_names)
-            asset_cfg.resolve(simulator.scene)  # Required to avoid applying randomization to all bodies
-            _isaacsim_randomize_rigid_body_mass(
-                simulator,
-                env_ids_cpu,
-                asset_cfg,
-                (link_mass_range[0], link_mass_range[1]),
-                operation="scale",
-            )
+        link_body_names = list(env.robot_config.randomize_link_body_names or [])
+        if replace_fixed_payload_dr:
+            link_body_names = [name for name in link_body_names if name not in fixed_payload_names]
+        apply_base_mass = bool(
+            enable_base_mass and not (replace_fixed_payload_dr and env.robot_config.torso_name in fixed_payload_names)
+        )
 
-        if enable_base_mass:
+        if enable_link_mass:
+            if link_body_names:
+                asset_cfg = SceneEntityCfg("robot", body_names=link_body_names)
+                asset_cfg.resolve(simulator.scene)  # Required to avoid applying randomization to all bodies
+                _isaacsim_randomize_rigid_body_mass(
+                    simulator,
+                    env_ids_cpu,
+                    asset_cfg,
+                    (link_mass_range[0], link_mass_range[1]),
+                    operation="scale",
+                )
+
+        if apply_base_mass:
             asset_cfg = SceneEntityCfg("robot", body_names=[env.robot_config.torso_name])
             asset_cfg.resolve(simulator.scene)  # Required to avoid applying randomization to all bodies
             _isaacsim_randomize_rigid_body_mass(
@@ -806,6 +1082,23 @@ def randomize_mass_startup(
                 (added_mass_range[0], added_mass_range[1]),
                 operation="add",
             )
+        for body_name, added_mass in fixed_payloads.items():
+            asset_cfg = SceneEntityCfg("robot", body_names=[body_name])
+            asset_cfg.resolve(simulator.scene)
+            _isaacsim_randomize_rigid_body_mass(
+                simulator,
+                env_ids_cpu,
+                asset_cfg,
+                (float(added_mass), float(added_mass)),
+                operation="add",
+            )
+        randomized_masses_isaacsim = _read_isaacsim_body_masses(simulator)
+        _write_isaacsim_mass_oracle_cache(
+            env,
+            idx,
+            nominal_masses=nominal_masses_isaacsim,
+            randomized_masses=randomized_masses_isaacsim,
+        )
     elif simulator.simulator_config.mujoco_backend == MujocoBackend.WARP:
         from holosoma.simulator.mujoco.backends.warp_randomization import randomize_field
 
@@ -813,21 +1106,29 @@ def randomize_mass_startup(
         if idx.numel() == 0:
             return
 
+        link_body_names = list(env.robot_config.randomize_link_body_names or [])
+        if replace_fixed_payload_dr:
+            link_body_names = [name for name in link_body_names if name not in fixed_payload_names]
+        apply_base_mass = bool(
+            enable_base_mass and not (replace_fixed_payload_dr and env.robot_config.torso_name in fixed_payload_names)
+        )
+
         if enable_link_mass:
             assert len(link_mass_range) == 2, (
                 f"link_mass_range must have exactly 2 elements, got {len(link_mass_range)}"
             )
-            randomize_field(
-                simulator,
-                field=getattr(randomize_mass_startup, MUJOCO_FIELD_ATTR),
-                ranges=(link_mass_range[0], link_mass_range[1]),
-                env_ids=idx,
-                entity_names=env.robot_config.randomize_link_body_names,
-                entity_type="body",
-                operation="scale",
-            )
+            if link_body_names:
+                randomize_field(
+                    simulator,
+                    field=getattr(randomize_mass_startup, MUJOCO_FIELD_ATTR),
+                    ranges=(link_mass_range[0], link_mass_range[1]),
+                    env_ids=idx,
+                    entity_names=link_body_names,
+                    entity_type="body",
+                    operation="scale",
+                )
 
-        if enable_base_mass:
+        if apply_base_mass:
             assert len(added_mass_range) == 2, (
                 f"added_mass_range must have exactly 2 elements, got {len(added_mass_range)}"
             )
@@ -837,6 +1138,16 @@ def randomize_mass_startup(
                 ranges=(added_mass_range[0], added_mass_range[1]),
                 env_ids=idx,
                 entity_names=[env.robot_config.torso_name],
+                entity_type="body",
+                operation="add",
+            )
+        for body_name, added_mass in fixed_payloads.items():
+            randomize_field(
+                simulator,
+                field=getattr(randomize_mass_startup, MUJOCO_FIELD_ATTR),
+                ranges=(float(added_mass), float(added_mass)),
+                env_ids=idx,
+                entity_names=[body_name],
                 entity_type="body",
                 operation="add",
             )
@@ -862,6 +1173,8 @@ def randomize_friction_startup(
     """
     env._randomize_friction = bool(enabled)
     env._friction_range = list(friction_range)
+    _ensure_oracle_randomization_buffers(env)
+    env.oracle_friction_coeff[:] = 1.0
     if not enabled:
         return
 
@@ -895,6 +1208,7 @@ def randomize_friction_startup(
             for prop in shape_props:
                 prop.friction = friction_value
             gym.set_actor_rigid_shape_properties(env_ptr, actor, shape_props)
+            env.oracle_friction_coeff[env_id, 0] = float(friction_value)
     elif simulator.__class__.__name__ == "IsaacSim":
         try:
             from isaaclab.managers import SceneEntityCfg
@@ -916,6 +1230,15 @@ def randomize_friction_startup(
             restitution_range=(0.0, 0.0),
             num_buckets=num_buckets,
         )
+        friction_obs = _read_isaacsim_static_friction(simulator)
+        if friction_obs is None:
+            logger.warning("IsaacSim friction oracle write-back skipped because material properties were unavailable.")
+        else:
+            idx_friction = idx.to(device=friction_obs.device, dtype=torch.long)
+            if friction_obs.shape[0] > int(idx_friction.max().item()):
+                env.oracle_friction_coeff[idx, 0] = friction_obs[idx_friction, 0].to(device=env.device)
+            else:
+                logger.warning("IsaacSim friction oracle write-back skipped due to unexpected friction tensor shape.")
 
     elif simulator.simulator_config.mujoco_backend == MujocoBackend.WARP:
         from holosoma.simulator.mujoco.backends.warp_randomization import randomize_field

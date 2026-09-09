@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from holosoma.config_types.randomization import RandomizationManagerCfg, RandomizationTermCfg
 
 t1_29dof_randomization = RandomizationManagerCfg(
@@ -105,4 +107,69 @@ t1_29dof_randomization = RandomizationManagerCfg(
     },
 )
 
+# ---------------------------------------------------------------------------
+# FADA: widen the domain-randomization ranges and add fixed-payload support to
+# mass_randomizer.
+# These ranges define the training distribution; changing any of them changes what the
+# policy is trained against.
+# ---------------------------------------------------------------------------
+t1_29dof_randomization = replace(
+    t1_29dof_randomization,
+    setup_terms={
+        **t1_29dof_randomization.setup_terms,
+        "push_randomizer_state": replace(
+            t1_29dof_randomization.setup_terms["push_randomizer_state"],
+            params={**t1_29dof_randomization.setup_terms["push_randomizer_state"].params, "max_push_vel": [0.1, 1.5]},
+        ),
+        "setup_torque_rfi": replace(
+            t1_29dof_randomization.setup_terms["setup_torque_rfi"],
+            params={**t1_29dof_randomization.setup_terms["setup_torque_rfi"].params, "enabled": True},
+        ),
+        "setup_dof_pos_bias": replace(
+            t1_29dof_randomization.setup_terms["setup_dof_pos_bias"],
+            params={
+                "dof_pos_bias_range": [-0.05, 0.05],
+                "enabled": True,
+            },
+        ),
+        "actuator_randomizer_state": replace(
+            t1_29dof_randomization.setup_terms["actuator_randomizer_state"],
+            params={
+                **t1_29dof_randomization.setup_terms["actuator_randomizer_state"].params,
+                "kp_range": [0.8, 1.2],
+                "kd_range": [0.8, 1.2],
+            },
+        ),
+        "mass_randomizer": replace(
+            t1_29dof_randomization.setup_terms["mass_randomizer"],
+            params={
+                **t1_29dof_randomization.setup_terms["mass_randomizer"].params,
+                "link_mass_range": [0.8, 1.3],
+                "added_mass_range": [-3.0, 6.0],
+                "fixed_payload_body_names": [],
+                "fixed_payload_added_masses": [],
+                "replace_fixed_payload_dr": True,
+            },
+        ),
+        "randomize_friction_startup": replace(
+            t1_29dof_randomization.setup_terms["randomize_friction_startup"],
+            params={
+                **t1_29dof_randomization.setup_terms["randomize_friction_startup"].params,
+                "friction_range": [0.1, 2.0],
+            },
+        ),
+        "randomize_base_com_startup": replace(
+            t1_29dof_randomization.setup_terms["randomize_base_com_startup"],
+            params={
+                "base_com_range": {"x": [-0.15, 0.15], "y": [-0.15, 0.15], "z": [-0.15, 0.15]},
+                "enabled": True,
+            },
+        ),
+    },
+)
+
+# T1-23dof shares the identical randomization schedule with T1-29dof.
+t1_23dof_randomization = t1_29dof_randomization
+
 __all__ = ["t1_29dof_randomization"]
+__all__ += ["t1_23dof_randomization"]

@@ -51,3 +51,11 @@ class ObservationConfig:
     Example:
         {"actor_obs": 1, "critic_obs": 3}
     """
+
+    past_history_groups: dict[str, bool] | None = None
+    """Optional flag per group to return past-only history (exclude current step).
+
+    If a group is marked True, the history buffer will return O_{t-1}..O_{t-H}
+    and append O_t afterwards (matching the training manager's ``past_history``).
+    Groups not listed (or set to False) include the current step in the stack.
+    """

@@ -23,6 +23,7 @@ src_root = Path(__file__).resolve().parents[2]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
+from holosoma_retargeting.asset_paths import require_asset_dir, require_asset_file  # noqa: E402
 from holosoma_retargeting.config_types.data_type import MotionDataConfig  # noqa: E402
 from holosoma_retargeting.config_types.retargeting import ParallelRetargetingConfig  # noqa: E402
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
@@ -314,6 +315,10 @@ def main(cfg: ParallelRetargetingConfig) -> None:
     data_format: str = cfg.data_format or DEFAULT_DATA_FORMATS[task_type]
     save_dir = cfg.save_dir if cfg.save_dir is not None else Path(PARALLEL_SAVE_DIRS[task_type].format(robot=robot))
     data_dir = cfg.data_dir
+    # `--data-dir` defaults to `demo_data/OMOMO_new`, which is checkout-relative: the
+    # retargeting assets are not in the wheel. Without this, a wheel install printed
+    # "Found 0 files" from an empty glob and exited successfully having done nothing.
+    require_asset_dir(data_dir, what="--data-dir")
 
     os.makedirs(save_dir, exist_ok=True)
     print(f"Task type: {task_type}, Format: {data_format}")
@@ -322,6 +327,12 @@ def main(cfg: ParallelRetargetingConfig) -> None:
     # Ensure configs match top-level selections
     if cfg.robot_config.robot_type != robot:
         cfg.robot_config = RobotConfig(robot_type=robot)
+
+    # The URDF lives in `models/`, a different asset tree from `--data-dir`'s
+    # `demo_data/`; a valid external data directory says nothing about whether it is
+    # present. Without this, a wheel install with a good `--data-dir` got all the way
+    # into per-file workers before failing on a missing URDF, once per worker.
+    require_asset_file(cfg.robot_config.ROBOT_URDF_FILE, what="robot URDF (--robot-config.robot-urdf-file)")
 
     if cfg.motion_data_config.robot_type != robot or cfg.motion_data_config.data_format != data_format:
         cfg.motion_data_config = MotionDataConfig(data_format=data_format, robot_type=robot)

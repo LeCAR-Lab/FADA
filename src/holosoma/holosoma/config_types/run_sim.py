@@ -68,6 +68,12 @@ class RunSimConfig:
     training: TrainingConfig = field(default_factory=default_training_config)
     logger: LoggerConfig = field(default_factory=default_logger_config)
 
+    deterministic_spawn: bool = True
+    """Use deterministic center non-edge tile spawn defaults in direct run_sim.
+
+    Set to False to preserve terrain preset spawn behavior, including random tile sampling.
+    """
+
     # Optional environment wrapper (only if needed for compatibility)
     env_class: str | None = None
 

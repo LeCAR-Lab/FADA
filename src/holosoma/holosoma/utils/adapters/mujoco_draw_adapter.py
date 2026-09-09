@@ -159,14 +159,14 @@ def draw_line(
         cross_matrix = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
         rotation_matrix = cos_angle * np.eye(3) + sin_angle * cross_matrix + (1 - cos_angle) * np.outer(axis, axis)
 
-    # Convert color to numpy array with alpha
-    color_array = np.array([color[0], color[1], color[2], 0.8], dtype=np.float32)
+    # Use higher alpha for better contrast in viewer.
+    color_array = np.array([color[0], color[1], color[2], 0.95], dtype=np.float32)
 
     # Initialize the capsule geometry
     mujoco.mjv_initGeom(
         simulator.viewer.user_scn.geoms[current_geoms],
         type=mujoco.mjtGeom.mjGEOM_CAPSULE,
-        size=[0.002, length / 2, 0],  # Small radius, half-length, unused
+        size=[0.005, length / 2, 0],  # Radius, half-length, unused
         pos=midpoint,
         mat=rotation_matrix.flatten(),
         rgba=color_array,

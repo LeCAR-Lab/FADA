@@ -47,6 +47,9 @@ class Terrain(TerrainInterface):
 
         self._env_length: int = max(1, int(self._cfg.terrain_length * self._cfg.scale_factor))
         self._env_width: int = max(1, int(self._cfg.terrain_width * self._cfg.scale_factor))
+        self._terrain_type_to_id: dict[str, int] = {}
+        self._terrain_id_to_type: list[str] = []
+        self._tile_type_ids: np.ndarray = np.full((self._num_rows, self._num_cols), -1, dtype=np.int16)
 
         if self._type in ["none"]:
             # a fully-managed terrain isn't supported for these types, so just return
@@ -103,6 +106,9 @@ class Terrain(TerrainInterface):
 
         self._terrain_types: list[str] = list(terrain_config.keys())
         self._terrain_proportions: list[float] = list(terrain_config.values())
+        self._terrain_type_to_id = {name: idx for idx, name in enumerate(self._terrain_types)}
+        self._terrain_id_to_type = list(self._terrain_types)
+        self._tile_type_ids = np.full((self._num_rows, self._num_cols), -1, dtype=np.int16)
         self._proportions: list[float] = [
             np.sum(self._terrain_proportions[: i + 1]) for i in range(len(self._terrain_proportions))
         ]
@@ -155,6 +161,34 @@ class Terrain(TerrainInterface):
     @property
     def mesh(self) -> trimesh.Trimesh:
         return self._mesh
+
+    @property
+    def num_rows(self) -> int:
+        return self._num_rows
+
+    @property
+    def num_cols(self) -> int:
+        return self._num_cols
+
+    @property
+    def env_length(self) -> float:
+        return float(self._env_length)
+
+    @property
+    def env_width(self) -> float:
+        return float(self._env_width)
+
+    @property
+    def terrain_type_to_id(self) -> dict[str, int]:
+        return dict(self._terrain_type_to_id)
+
+    @property
+    def terrain_id_to_type(self) -> list[str]:
+        return list(self._terrain_id_to_type)
+
+    @property
+    def tile_type_ids(self) -> np.ndarray:
+        return self._tile_type_ids.copy()
 
     def _get_load_obj_env_origin_grid(self) -> np.ndarray:
         grid = getattr(self, "_load_obj_origin_grid", None)
@@ -214,13 +248,17 @@ class Terrain(TerrainInterface):
             print(f"generating randomized terrains {k} / {self._num_sub_terrains}     ", end="\r")
             # Env coordinates in the world
             (i, j) = np.unravel_index(k, (self._num_rows, self._num_cols))
+            self._current_tile_row = int(i)
+            self._current_tile_col = int(j)
 
             terrain_type = np.random.choice(self._terrain_types, p=proportions)
             difficulty = np.random.choice([0.5, 0.75, 0.9])
             if terrain_type in {"smooth_slope", "rough_slope", "slope"}:
                 difficulty = i / self._num_rows
+            elif terrain_type in {"fixed_smooth_slope", "fixed_rough_slope"}:
+                difficulty = 1.0
             terrain = self.make_terrain(terrain_type, difficulty)
-            self.add_terrain_to_map(terrain, int(i), int(j))
+            self.add_terrain_to_map(terrain, int(i), int(j), terrain_type=terrain_type)
         print("\n generated all randomized terrains!")
 
     def make_terrain(self, terrain_type: str, difficulty: float) -> Any:
@@ -250,7 +288,7 @@ class Terrain(TerrainInterface):
         terrain_func(terrain, difficulty)
         return terrain
 
-    def add_terrain_to_map(self, terrain: Any, row: int, col: int) -> None:
+    def add_terrain_to_map(self, terrain: Any, row: int, col: int, terrain_type: str | None = None) -> None:
         """Add a sub-terrain to the global heightfield map at specified position.
 
         Parameters
@@ -281,6 +319,8 @@ class Terrain(TerrainInterface):
         y2 = int((self._env_width / 2.0 + 0.5) / terrain.horizontal_scale)
         env_origin_z = np.max(terrain.height_field_raw[x1:x2, y1:y2]) * terrain.vertical_scale
         self._env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
+        if terrain_type is not None and terrain_type in self._terrain_type_to_id:
+            self._tile_type_ids[i, j] = np.int16(self._terrain_type_to_id[terrain_type])
 
     def _flat_terrain_func(self, terrain: Any, difficulty: float) -> None:
         """Create a completely flat terrain with zero height everywhere.
@@ -310,6 +350,41 @@ class Terrain(TerrainInterface):
         max_height = 0.025 * difficulty / 0.9
         terrain.height_field_raw = (
             np.random.uniform(-max_height * 2 - 0.025, -0.025, terrain.height_field_raw.shape) / terrain.vertical_scale
+        )
+
+    def _fixed_smooth_slope_terrain_func(self, terrain: Any, difficulty: float) -> None:
+        """Generate a smooth sloped terrain at a fixed angle (ignores difficulty, always uses max_slope).
+
+        All tiles get exactly max_slope regardless of row position, yielding a uniform slope angle.
+        The center tile (used as the deterministic eval spawn tile) is always UP pyramid; all other
+        tiles are randomly UP or DOWN to match the training distribution.
+        """
+        slope = self._max_slope
+        tile_row = getattr(self, "_current_tile_row", None)
+        tile_col = getattr(self, "_current_tile_col", None)
+        center_row = (self._num_rows - 1) // 2
+        center_col = (self._num_cols - 1) // 2
+        if tile_row != center_row or tile_col != center_col:
+            slope *= np.random.randint(0, 2) * 2 - 1
+        terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=self._cfg.platform_size)
+
+    def _fixed_rough_slope_terrain_func(self, terrain: Any, difficulty: float) -> None:
+        """Generate a rough sloped terrain at a fixed angle (ignores difficulty, always uses max_slope).
+
+        Mirror of ``_fixed_smooth_slope_terrain_func`` plus random uniform roughness on top
+        (same overlay used by ``_rough_slope_terrain_func``). Center tile is always UP pyramid.
+        """
+        slope = self._max_slope
+        tile_row = getattr(self, "_current_tile_row", None)
+        tile_col = getattr(self, "_current_tile_col", None)
+        center_row = (self._num_rows - 1) // 2
+        center_col = (self._num_cols - 1) // 2
+        if tile_row != center_row or tile_col != center_col:
+            slope *= np.random.randint(0, 2) * 2 - 1
+        amplitude = np.random.uniform(self._cfg.amplitude_range[0], self._cfg.amplitude_range[1])
+        terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=self._cfg.platform_size)
+        terrain_utils.random_uniform_terrain(
+            terrain, min_height=-amplitude, max_height=amplitude, step=terrain.vertical_scale, downsampled_scale=0.2
         )
 
     def _smooth_slope_terrain_func(self, terrain: Any, difficulty: float) -> None:

@@ -55,4 +55,71 @@ g1_29dof_fast_sac = ExperimentConfig(
     ),
 )
 
+g1_29dof_deploy = ExperimentConfig(
+    env_class="holosoma.envs.locomotion.locomotion_manager.LeggedRobotLocomotionManager",
+    training=TrainingConfig(project="hv-g1-manager", name="g1_29dof_deploy_manager"),
+    algo=replace(
+        algo.ppo_deploy, config=replace(algo.ppo_deploy.config, num_learning_iterations=25000, use_symmetry=False)
+    ),
+    simulator=simulator.isaacsim,
+    robot=robot.g1_29dof,
+    terrain=terrain.terrain_locomotion_mix,
+    observation=observation.g1_29dof_loco_single_wolinvel_deploy,
+    action=action.g1_29dof_joint_pos,
+    termination=termination.g1_29dof_termination,
+    randomization=randomization.g1_29dof_randomization,
+    command=command.g1_29dof_command,
+    curriculum=curriculum.g1_29dof_curriculum,
+    reward=reward.g1_29dof_loco_unitree,
+    nightly=NightlyConfig(
+        iterations=5000,
+        metrics={"Episode/rew_tracking_ang_vel": [0.7, "inf"], "Episode/rew_tracking_lin_vel": [0.55, "inf"]},
+    ),
+)
+
+g1_29dof_oracle = ExperimentConfig(
+    env_class="holosoma.envs.locomotion.locomotion_manager.LeggedRobotLocomotionManager",
+    training=TrainingConfig(project="hv-g1-manager", name="g1_29dof_oracle_manager"),
+    algo=replace(
+        algo.ppo_deploy,
+        config=replace(
+            algo.ppo_deploy.config,
+            num_learning_iterations=25000,
+            use_symmetry=False,
+            module_dict=replace(
+                algo.ppo_deploy.config.module_dict,
+                actor=replace(
+                    algo.ppo_deploy.config.module_dict.actor,
+                    layer_config=replace(
+                        algo.ppo_deploy.config.module_dict.actor.layer_config,
+                        hidden_dims=[512, 256, 128],
+                    ),
+                ),
+                critic=replace(
+                    algo.ppo_deploy.config.module_dict.critic,
+                    layer_config=replace(
+                        algo.ppo_deploy.config.module_dict.critic.layer_config,
+                        hidden_dims=[512, 256, 128],
+                    ),
+                ),
+            ),
+        ),
+    ),
+    simulator=simulator.isaacsim,
+    robot=robot.g1_29dof,
+    terrain=terrain.terrain_locomotion_mix,
+    observation=observation.g1_29dof_loco_oracle,
+    action=action.g1_29dof_joint_pos,
+    termination=termination.g1_29dof_termination,
+    randomization=randomization.g1_29dof_randomization,
+    command=command.g1_29dof_command,
+    curriculum=curriculum.g1_29dof_curriculum,
+    reward=reward.g1_29dof_loco_unitree,
+    nightly=NightlyConfig(
+        iterations=5000,
+        metrics={"Episode/rew_tracking_ang_vel": [0.7, "inf"], "Episode/rew_tracking_lin_vel": [0.55, "inf"]},
+    ),
+)
+
 __all__ = ["g1_29dof", "g1_29dof_fast_sac"]
+__all__ += ["g1_29dof_deploy", "g1_29dof_oracle"]

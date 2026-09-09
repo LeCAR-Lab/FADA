@@ -16,6 +16,40 @@ from holosoma_inference.config.config_types.robot import RobotConfig
 
 # fmt: off
 
+# G1 29-DOF per-joint action scales for BeyondMimic-style scaling (0.25 * effort / p_gain).
+# TODO: this is legacy for onnx that do not have action scale vector in metadata
+G1_29DOF_PER_JOINT_ACTION_SCALE = (
+    0.547546465219,
+    0.350661466378,
+    0.547546465219,
+    0.350661466378,
+    0.438577313919,
+    0.438577313919,
+    0.547546465219,
+    0.350661466378,
+    0.547546465219,
+    0.350661466378,
+    0.438577313919,
+    0.438577313919,
+    0.547546465219,
+    0.438577313919,
+    0.438577313919,
+    0.438577313919,
+    0.438577313919,
+    0.438577313919,
+    0.438577313919,
+    0.438577313919,
+    0.074500870329,
+    0.074500870329,
+    0.438577313919,
+    0.438577313919,
+    0.438577313919,
+    0.438577313919,
+    0.438577313919,
+    0.074500870329,
+    0.074500870329,
+)
+
 g1_29dof = RobotConfig(
     # Identity
     robot_type="g1_29dof",
@@ -105,12 +139,122 @@ g1_29dof = RobotConfig(
         "right_wrist_roll_joint": 26, "right_wrist_pitch_joint": 27, "right_wrist_yaw_joint": 28,
     },
     motion={"body_name_ref": ["torso_link"]},
+    default_per_joint_action_scale=G1_29DOF_PER_JOINT_ACTION_SCALE,
 )
 
 
 # =============================================================================
 # T1 Robot Config
 # =============================================================================
+
+t1_23dof = RobotConfig(
+    # Identity
+    robot_type="t1_23dof",
+    robot="t1",
+
+    # SDK Configuration
+    sdk_type="booster",  # T1 uses booster SDK
+    motor_type="serial",
+    message_type="HG",  # Using default
+    use_sensor=False,
+
+    # Dimensions
+    num_motors=23,
+    num_joints=23,
+    num_upper_body_joints=10,  # T1 23dof has 10 upper body joints (includes head, no wrist/hand)
+
+    # Default Positions
+    default_dof_angles=(
+        0.0, 0.0,  # head (yaw, pitch)
+        0.2, -1.35, 0.0, -0.5,  # left arm (no wrist/hand)
+        0.2, 1.35, 0.0, 0.5,  # right arm (no wrist/hand)
+        0.0,  # waist
+        -0.2, 0.0, 0.0, 0.4, -0.25, 0.0,  # left leg
+        -0.2, 0.0, 0.0, 0.4, -0.25, 0.0,  # right leg
+    ),
+    default_motor_angles=(
+        0.0, 0.0,  # head
+        0.2, -1.35, 0.0, -0.5,  # left arm
+        0.2, 1.35, 0.0, 0.5,  # right arm
+        0.0,  # waist
+        -0.2, 0.0, 0.0, 0.4, -0.25, 0.0,  # left leg
+        -0.2, 0.0, 0.0, 0.4, -0.25, 0.0,  # right leg
+    ),
+
+    # Limits
+    joint_pos_min=(
+        -1.57, -0.35,  # head
+        -3.31, -1.74, -2.27, -2.44,  # left arm
+        -3.31, -1.57, -2.27, 0.0,  # right arm
+        -1.57,  # waist
+        -1.8, -0.2, -1.0, 0.0, -0.87, -0.44,  # left leg
+        -1.8, -1.57, -1.0, 0.0, -0.87, -0.44,  # right leg
+    ),
+    joint_pos_max=(
+        1.57, 1.22,  # head
+        1.22, 1.57, 2.27, 0.0,  # left arm
+        1.22, 1.74, 2.27, 2.44,  # right arm
+        1.57,  # waist
+        1.57, 1.57, 1.0, 2.34, 0.35, 0.44,  # left leg
+        1.57, 0.2, 1.0, 2.34, 0.35, 0.44,  # right leg
+    ),
+    joint_vel_limit=(
+        12.56, 12.56,  # head
+        18.84, 18.84, 18.84, 18.84,  # left arm
+        18.84, 18.84, 18.84, 18.84,  # right arm
+        10.88,  # waist
+        12.5, 10.9, 10.9, 11.7, 18.8, 12.4,  # left leg
+        12.5, 10.9, 10.9, 11.7, 18.8, 12.4,  # right leg
+    ),
+    motor_effort_limit=(
+        7.0, 7.0,  # head
+        18.0, 18.0, 18.0, 18.0,  # left arm
+        18.0, 18.0, 18.0, 18.0,  # right arm
+        30.0,  # waist
+        45.0, 30.0, 30.0, 60.0, 20.0, 15.0,  # left leg
+        45.0, 30.0, 30.0, 60.0, 20.0, 15.0,  # right leg
+    ),
+
+    # Mappings
+    motor2joint=tuple(range(23)),  # Identity mapping
+    joint2motor=tuple(range(23)),  # Identity mapping
+    dof_names=(
+        "AAHead_yaw", "Head_pitch",
+        "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+        "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+        "Waist",
+        "Left_Hip_Pitch", "Left_Hip_Roll", "Left_Hip_Yaw",
+        "Left_Knee_Pitch", "Left_Ankle_Pitch", "Left_Ankle_Roll",
+        "Right_Hip_Pitch", "Right_Hip_Roll", "Right_Hip_Yaw",
+        "Right_Knee_Pitch", "Right_Ankle_Pitch", "Right_Ankle_Roll",
+    ),
+    dof_names_upper_body=(
+        "AAHead_yaw", "Head_pitch",
+        "Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+        "Right_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+    ),
+    dof_names_lower_body=(
+        "Waist",
+        "Left_Hip_Pitch", "Left_Hip_Roll", "Left_Hip_Yaw",
+        "Left_Knee_Pitch", "Left_Ankle_Pitch", "Left_Ankle_Roll",
+        "Right_Hip_Pitch", "Right_Hip_Roll", "Right_Hip_Yaw",
+        "Right_Knee_Pitch", "Right_Ankle_Pitch", "Right_Ankle_Roll",
+    ),
+
+    # Control Gains (optional, can be loaded from ONNX)
+    motor_kp=None,
+    motor_kd=None,
+
+    # Link Names
+    torso_link_name="Trunk",
+    left_hand_link_name="left_hand_link",
+    right_hand_link_name="right_hand_link",
+
+    # SDK-Specific
+    unitree_legged_const=None,
+    weak_motor_joint_index=None,
+    motion={"body_name_ref": ["Trunk"]},
+)
 
 t1_29dof = RobotConfig(
     # Identity
@@ -192,8 +336,10 @@ t1_29dof = RobotConfig(
 # Default Configurations Dictionary
 # =============================================================================
 
+# Core defaults - no extension imports at module load time
 DEFAULTS = {
     "g1-29dof": g1_29dof,
+    "t1-23dof": t1_23dof,
     "t1-29dof": t1_29dof,
 }
 """Dictionary of all available robot configurations.
@@ -204,3 +350,30 @@ Keys use hyphen-case naming convention for CLI compatibility.
 # Auto-discover robot configs from installed extensions
 for ep in entry_points(group="holosoma.config.robot"):
     DEFAULTS[ep.name] = ep.load()
+
+# Track whether extensions have been loaded
+_extensions_loaded = False
+
+
+def _load_extensions() -> None:
+    """Lazily load extension configs from entry points.
+
+    This is deferred to avoid circular imports when extensions import
+    from holosoma_inference.config at module load time.
+    """
+    global _extensions_loaded  # noqa: PLW0603
+    if _extensions_loaded:
+        return
+    _extensions_loaded = True
+    for ep in entry_points(group="holosoma.config.robot"):
+        DEFAULTS[ep.name] = ep.load()
+
+
+def get_defaults() -> dict:
+    """Get all robot config defaults, including extensions.
+
+    Returns:
+        Dictionary mapping config names to RobotConfig instances.
+    """
+    _load_extensions()
+    return DEFAULTS

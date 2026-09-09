@@ -37,7 +37,8 @@ from holosoma.config_types.terrain import TerrainManagerCfg
 
 
 def now_timestamp() -> str:
-    return datetime.datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    """Get current timestamp in experiment format (local time)."""
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 @dataclass(frozen=True)
@@ -85,13 +86,33 @@ class TrainingConfig:
     export_onnx: bool = True
     """Export policy as ONNX model."""
 
+    # Data collection settings
+    collect_data: bool = False
+    """Enable data collection during evaluation/inference."""
+
+    data_collection_output_dir: str = "logs/data_collection/eval"
+    """Output directory for collected data."""
+
+    data_collection_dataset_name: str = "dataset"
+    """Name of the collected dataset."""
+
+    data_collection_compress: bool = True
+    """Whether to compress HDF5 data."""
+
+    data_collection_skip_obs_keys: tuple[str, ...] = ("actor_obs", "critic_obs")
+    """Observation groups to skip when collecting data (e.g., latent actor/critic inputs)."""
+
 
 @dataclass(frozen=True)
 class EvalOverridesConfig:
     headless: bool = False
     num_envs: int = 1
     disable_logger: bool = True
-    max_episode_length_s: float = 100000.0
+    max_episode_length_s: float | None = None
+    """Override env's max_episode_length_s. None = keep training value (the safe default).
+    Reward rates are normalized by this in `reward_manager.get_episode_rates`, so a huge
+    value (e.g., the old 100000s viz default) silently deflates rew_tracking_* in multi-env
+    eval. Set explicitly only for single-env visualization where long episodes are wanted."""
     randomize_tiles: bool = False
     """Use deterministic spawn at tile (0,0) for reproducible evaluation."""
     xy_offset_range: float = 0.0
@@ -188,6 +209,12 @@ class ExperimentConfig:
             xy_offset_range=self.eval_overrides.xy_offset_range,
         )
 
+        sim_cfg = self.simulator.config.sim
+        if self.eval_overrides.max_episode_length_s is not None:
+            sim_cfg = dataclasses.replace(
+                sim_cfg, max_episode_length_s=self.eval_overrides.max_episode_length_s
+            )
+
         return dataclasses.replace(
             self,
             terrain=dataclasses.replace(
@@ -199,13 +226,7 @@ class ExperimentConfig:
             ),
             simulator=dataclasses.replace(
                 self.simulator,
-                config=dataclasses.replace(
-                    self.simulator.config,
-                    sim=dataclasses.replace(
-                        self.simulator.config.sim,
-                        max_episode_length_s=self.eval_overrides.max_episode_length_s,
-                    ),
-                ),
+                config=dataclasses.replace(self.simulator.config, sim=sim_cfg),
             ),
             training=dataclasses.replace(
                 self.training,

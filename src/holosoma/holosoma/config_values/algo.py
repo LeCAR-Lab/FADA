@@ -36,7 +36,64 @@ ppo = PPOAlgoConfig(
         init_noise_std=0.8,
         num_learning_iterations=1000000,
         init_at_random_ep_len=True,
+        empirical_normalization=False,
         eval_callbacks=None,
+        module_dict=PPOModuleDictConfig(
+            actor=ModuleConfig(
+                type="MLP",
+                input_dim=["actor_obs"],
+                output_dim=["robot_action_dim"],
+                layer_config=LayerConfig(hidden_dims=[512, 256, 128], activation="ELU"),
+            ),
+            critic=ModuleConfig(
+                type="MLP",
+                input_dim=["critic_obs"],
+                output_dim=[1],
+                layer_config=LayerConfig(hidden_dims=[512, 256, 128], activation="ELU"),
+            ),
+        ),
+    ),
+)
+
+ppo_deploy = PPOAlgoConfig(
+    _target_="holosoma.agents.ppo.ppo.PPO_Deploy",
+    _recursive_=False,
+    config=PPOConfig(
+        num_learning_epochs=8,
+        num_mini_batches=4,
+        clip_param=0.2,
+        gamma=0.99,
+        lam=0.95,
+        value_loss_coef=1.0,
+        entropy_coef=0.01,
+        actor_learning_rate=1e-5,
+        actor_optimizer=OptimizerConfig(_target_="torch.optim.AdamW", weight_decay=0.001),
+        critic_learning_rate=1e-5,
+        critic_optimizer=OptimizerConfig(_target_="torch.optim.AdamW", weight_decay=0.001),
+        max_grad_norm=1.0,
+        schedule="adaptive",
+        desired_kl=0.01,
+        use_symmetry=False,
+        symmetry_actor_coef=1.0,
+        symmetry_critic_coef=0.0,
+        num_steps_per_env=24,
+        save_interval=100,
+        load_optimizer=True,
+        init_noise_std=0.8,
+        num_learning_iterations=1000000,
+        init_at_random_ep_len=True,
+        eval_callbacks={
+            "analysis_plot_cb": {
+                "_target_": "holosoma.agents.callbacks.analysis_plot_locomotion.AnalysisPlotLocomotion",
+                "config": {
+                    "sim_dt": 0.02,
+                    "log_single_robot": False,
+                    "plot_update_interval": 500,
+                    "log_dir": None,
+                    "command_resample_interval": -1,
+                },
+            }
+        },
         module_dict=PPOModuleDictConfig(
             actor=ModuleConfig(
                 type="MLP",
@@ -102,5 +159,6 @@ fast_sac = FastSACAlgoConfig(
 
 DEFAULTS = {
     "ppo": ppo,
+    "ppo_deploy": ppo_deploy,
     "fast_sac": fast_sac,
 }

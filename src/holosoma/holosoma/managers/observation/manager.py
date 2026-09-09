@@ -210,6 +210,34 @@ class ObservationManager:
         """
         return obs * scale
 
+    def _apply_past_history(self, group_name: str, term_name: str, obs: torch.Tensor, group_cfg: ObsGroupCfg, *, modify_buffer: bool = True) -> torch.Tensor:
+        """Apply past history buffering to an observation term.
+
+        Maintains a circular buffer of past observations and returns them
+        concatenated along the feature dimension. Returns O_{t-1} to O_{t-H}
+        (excludes current observation O_t).
+        """
+        buffer = self._history_buffers[group_name][term_name]
+
+        history = list(buffer)
+
+        # If buffer not full yet, pad with zeros (same as direct behavior)
+        if len(history) < group_cfg.history_length:
+            num_missing = group_cfg.history_length - len(history)
+            obs_dim = obs.shape[1]
+            padding = [torch.zeros(self.env.num_envs, obs_dim, device=self.device) for _ in range(num_missing)]
+            history = padding + history
+
+        # Stack along time dimension: [num_envs, history_length, obs_dim]
+        stacked = torch.stack(history, dim=1)
+
+        # Append current observation to buffer for next iteration (after stacking)
+        if modify_buffer:
+            buffer.append(obs)
+
+        #directly return the stacked tensor
+        return stacked
+
     def _apply_history(
         self, group_name: str, term_name: str, obs: torch.Tensor, group_cfg: ObsGroupCfg, *, modify_buffer: bool = True
     ) -> torch.Tensor:
@@ -237,6 +265,9 @@ class ObservationManager:
         torch.Tensor
             Historical observations with shape ``[num_envs, obs_dim * history_length]``.
         """
+        # FADA: dispatch to the past-history variant.
+        if group_cfg.past_history:
+            return self._apply_past_history(group_name, term_name, obs, group_cfg, modify_buffer=modify_buffer)
         buffer = self._history_buffers[group_name][term_name]
 
         if modify_buffer:
