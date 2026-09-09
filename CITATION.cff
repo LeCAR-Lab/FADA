@@ -1,0 +1,50 @@
+cff-version: 1.2.0
+title: Holosoma
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - name: Amazon FAR
+  - given-names: Pieter
+    family-names: Abbeel
+  - given-names: Juyue
+    family-names: Chen
+  - given-names: Rocky
+    family-names: Duan
+  - given-names: Alejandro
+    family-names: Escontrela
+  - given-names: Manan
+    family-names: Gandhi
+  - given-names: Samuel
+    family-names: Gundry
+  - given-names: Xiaoyu
+    family-names: Huang
+  - given-names: Angjoo
+    family-names: Kanazawa
+  - given-names: Tomasz
+    family-names: Lewicki
+  - given-names: Jiaman
+    family-names: Li
+  - given-names: Karen
+    family-names: Liu
+  - given-names: Clay
+    family-names: Rosenthal
+  - given-names: Younggyo
+    family-names: Seo
+  - given-names: Carlo
+    family-names: Sferrazza
+  - given-names: Guanya
+    family-names: Shi
+  - given-names: Linda
+    family-names: Shih
+  - given-names: Jonathan
+    family-names: Tseng
+  - given-names: Zhen
+    family-names: Wu
+  - given-names: Lujie
+    family-names: Yang
+  - given-names: Brent
+    family-names: Yi
+  - given-names: Yuanhang
+    family-names: Zhang

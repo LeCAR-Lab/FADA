@@ -1,0 +1,47 @@
+[tool.ruff]
+target-version = "py38"
+line-length = 120
+lint.select = ["ALL"]
+lint.fixable = ["ALL"]
+lint.ignore=[
+    "C901", "PLR0912", "S311", "SLF001", "PLR0915", "PLR2004", "B904",
+    "N806", "PLR0911", "DTZ005",
+    "NPY002",  # Replace legacy `np.random.uniform` call with `np.random.Generator`
+    "SIM105",  # Use `contextlib.suppress(queue.Empty)` instead of `try`-`except`-`pass`
+    "TC001", "TC002", "TC003",  # move imports into a type-checking block
+    "PT018",  # multiple parts in assert
+    "SLF001",  # access private member
+    "SIM102",  # nested if
+    "FBT",  # Boolean positional value in function call
+    "C416",  # dict comprehension
+    "TRY", "EM",  # exception messages
+    "S101", "S301",  # assert, pickle
+    "PTH103", "PTH111", "PTH118", "PTH123", "PTH100", "PTH120", # os.makedirs, os.path.expanduser, etc.
+    "ARG001",  "ARG002",  # unused function arg
+    "T201",  # print statements
+    "COM812",  # trailing comma missing
+    "ERA001",  # commented out code
+    "INP001",  # file part of an implicit namespace package. Add an `__init__.py`.
+    "EXE",  # file is executable but no shebang is present
+    "FIX", # lines with todo comments
+    "TD",  # names/colon for assigning todo comments
+    "D",  # docstring details for public functions
+    "ANN", # return type annotations for public functions
+    "S603",  # check for untrusted input for subprocess
+    "SIM108",  # ternary operator enforcement
+    "S108",  # portable path
+    "S607",  # partial executable path
+    "RUF012", "RUF013", "RUF005",  # iterable unpacking
+    "BLE001",  # blind exception
+    "PLR0913",  # number of args to a function
+    "B026",  # Star-arg unpacking after a keyword argument
+    "PLE1205", # Too many arguments for `logging` format string; skip this since it doesn't recognize the {...} syntax
+    "N812", # comman pattern of import torch.nn.functional as F
+    "UP006",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/holosoma/holosoma/simulator/isaacsim/**/*.py" = ["ALL"]  # Disable until Jenkins has access to IsaacLab
+"src/holosoma/holosoma/train_agent.py" = ["PLC0415"]  # Disable since imports after SimApp are inherent to IsaacSim
+"src/holosoma/holosoma/utils/draw.py" = ["F401"]  # Disable since unused imports are required for the adapters
+"src/holosoma/holosoma/utils/eval_utils.py" = ["PLC0415"]  # Disable since imports after SimApp are inherent to IsaacSim

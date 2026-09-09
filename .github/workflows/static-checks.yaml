@@ -1,0 +1,44 @@
+name: Static Checks
+
+permissions:
+  contents: read
+  pull-requests: write
+
+on:
+  pull_request:
+    types:
+    - opened
+    - reopened
+    - synchronize
+
+jobs:
+  run-checks:
+    name: Run Checks
+    runs-on: codebuild-holosoma-cpu-build-${{ github.run_id }}-${{ github.run_attempt }}
+    container:
+      image: 982423663241.dkr.ecr.us-west-2.amazonaws.com/holosoma:latest
+      volumes:
+        - "precommit-cache:/github/home/.cache/pre-commit"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 5
+      - name: Static Checks
+        shell: bash
+        run: |
+          ln -s /root/.holosoma_deps "$HOME/.holosoma_deps"
+          if [[ ! -L /workspace/holosoma ]]; then
+            rm -rf /workspace/holosoma
+            ln -sfF "$GITHUB_WORKSPACE" /workspace/holosoma
+          fi
+          source scripts/source_isaacgym_setup.sh
+          pip install pre-commit mypy slack-sdk
+          git fetch origin "${GITHUB_BASE_REF:-main}"
+          git fetch origin "${GITHUB_SHA}"
+          pre-commit install-hooks
+          git diff --name-only "origin/${GITHUB_BASE_REF:-main}" "${GITHUB_SHA}" --
+          git diff --name-only "origin/${GITHUB_BASE_REF:-main}" "${GITHUB_SHA}" -- | xargs pre-commit run --files \
+            || ( git diff --exit-code && echo "pre-commit checks failed" )
+          mypy .

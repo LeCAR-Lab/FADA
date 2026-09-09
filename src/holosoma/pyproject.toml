@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "holosoma"
+version = "0.0.1"
+requires-python = ">=3.8"
+dependencies = [
+    "astor",
+    "easydict",
+    "importlib_resources; python_version < '3.9'",
+    "ipdb",
+    "joblib",
+    "loguru",
+    "lxml",
+    "lxml-stubs",
+    "matplotlib",
+    "meshcat",
+    "mypy==1.14.1",
+    "notebook",
+    "numpy-stl",
+    "numpy==1.23.5",
+    "omegaconf",  # Used for config resolvers and DictConfig type hints
+    "onnx",
+    "onnxruntime",
+    "open3d",
+    "opencv-python",
+    "plotly",
+    "pydantic",
+    "pygame",
+    "pynput",
+    "pytest",
+    "rich",
+    "scipy",
+    "shapely",
+    "smart_open[s3]",
+    "tensorboard",
+    "tensordict",
+    "termcolor",
+    "tqdm",
+    "trimesh",
+    "types-pynput",
+    "types-python-dateutil",
+    "types-requests",
+    "types-tqdm",
+    "tyro>=1.0.0",
+    "wandb==0.22.0", # pin version until https://github.com/wandb/wandb/issues/10647 is fixed
+    "warp-lang==1.10.0",
+    "yourdfpy>=0.0.58",
+    "zmq",
+]
+
+
+# Mark optional-dependencies as dynamic since it needs runtime computation
+dynamic = ["optional-dependencies"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+markers = [
+    "isaacsim: marks tests as requiring Isaac Sim (deselect with '-m \"not isaacsim\"')",
+    "multi_gpu: marks tests as requiring multiple GPUs (deselect with '-m \"not multi_gpu\"')",
+]

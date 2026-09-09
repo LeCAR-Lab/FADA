@@ -1,0 +1,11 @@
+<mujocoinclude>
+    <mesh name="box1" file="../../../demo_data/climb/mocap_climb_seq_4/box_models/box1.obj"
+        scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="box2" file="../../../demo_data/climb/mocap_climb_seq_4/box_models/box2.obj"
+        scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="box3" file="../../../demo_data/climb/mocap_climb_seq_4/box_models/box3.obj"
+        scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <material name="box1_material" rgba="0.3 0.7 0.9 0.5"/>
+    <material name="box2_material" rgba="0.7 0.3 0.9 0.5"/>
+    <material name="box3_material" rgba="0.9 0.7 0.3 0.5"/>
+</mujocoinclude>
